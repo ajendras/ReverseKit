@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "revkit"
+version = "0.1.0"
+description = "All-in-one CLI toolkit for binary disassembly, analysis, visualization and local-AI annotation"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "RevKit Contributors"}]
+keywords = ["reverse-engineering", "disassembly", "binary-analysis", "capstone", "lief", "ollama"]
+dependencies = [
+    "lief>=0.14.0",
+    "capstone>=5.0.1",
+    "networkx>=3.2",
+    "rich>=13.7",
+    "typer[all]>=0.9",
+    "ollama>=0.2.0",
+]
+
+[project.scripts]
+revkit = "revkit.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["revkit"]
+
+[tool.setuptools.dynamic]
+version = {attr = "revkit.__version__"}
+
+[project.optional-dependencies]
+test = ["pytest>=8.0", "pytest-mock>=3.12"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "--strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"

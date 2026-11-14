@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="572" viewBox="0 0 900 572" role="img" aria-label="RevKit — demo">
+  <style>
+    text{font-family:ui-monospace,SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;font-size:15px}
+    .l{opacity:0}
+    .ty{clip-path:inset(0 100% 0 0)}
+    .cur{animation:blink 1s steps(1) infinite}
+    @keyframes show{to{opacity:1}}
+    @keyframes type{to{clip-path:inset(0 0 0 0)}}
+    @keyframes blink{50%{opacity:0}}
+    @media (prefers-reduced-motion:reduce){.l{opacity:1;animation:none!important}.ty{clip-path:none;animation:none!important}}
+  </style>
+  <rect width="900" height="572" rx="14" fill="#0d1117"/>
+  <rect x=".5" y=".5" width="899" height="572" rx="14" fill="none" stroke="#30363d"/>
+  <rect width="900" height="40" rx="14" fill="#161b22"/><rect y="26" width="900" height="14" fill="#161b22"/>
+  <circle cx="24" cy="20" r="6" fill="#ff5f57"/><circle cx="44" cy="20" r="6" fill="#febc2e"/><circle cx="64" cy="20" r="6" fill="#28c840"/>
+  <text x="450" y="25" text-anchor="middle" fill="#8b949e" style="font-size:13px">RevKit — demo</text>
+<text x="28" y="74" class="l" style="animation:show .01s 0.60s forwards"><tspan fill="#ff0044">❯</tspan></text><text x="50" y="74" class="l ty" style="animation:show .01s 0.60s forwards,type 0.95s steps(21) 0.60s forwards" fill="#e5e7eb">pip install -q revkit</text>
+<text x="50" y="100" class="l" style="animation:show .01s 1.85s forwards" fill="#4ade80">Successfully installed revkit-0.1.0</text>
+<text x="50" y="126" class="l" style="animation:show .01s 2.07s forwards" fill="#94a3b8">Dependencies: lief, capstone, ollama ready</text>
+<text x="28" y="178" class="l" style="animation:show .01s 2.64s forwards"><tspan fill="#ff0044">❯</tspan></text><text x="50" y="178" class="l ty" style="animation:show .01s 2.64s forwards,type 1.04s steps(23) 2.64s forwards" fill="#e5e7eb">revkit info crackme.elf</text>
+<text x="50" y="204" class="l" style="animation:show .01s 3.98s forwards" fill="#94a3b8">Format     : ELF 64-bit LSB</text>
+<text x="50" y="230" class="l" style="animation:show .01s 4.20s forwards" fill="#94a3b8">Arch       : x86-64</text>
+<text x="50" y="256" class="l" style="animation:show .01s 4.42s forwards" fill="#94a3b8">Entry      : 0x401000</text>
+<text x="50" y="282" class="l" style="animation:show .01s 4.64s forwards" fill="#94a3b8">Sections   : 11, Symbols: 42 (stripped)</text>
+<text x="28" y="334" class="l" style="animation:show .01s 5.21s forwards"><tspan fill="#ff0044">❯</tspan></text><text x="50" y="334" class="l ty" style="animation:show .01s 5.21s forwards,type 2.20s steps(51) 5.21s forwards" fill="#e5e7eb">revkit disassemble crackme.elf --function check_key</text>
+<text x="50" y="360" class="l" style="animation:show .01s 7.71s forwards" fill="#94a3b8">00000000004011a0 &lt;check_key&gt;:</text>
+<text x="50" y="386" class="l" style="animation:show .01s 7.93s forwards" fill="#94a3b8">4011a0: 55                    push   rbp</text>
+<text x="50" y="412" class="l" style="animation:show .01s 8.15s forwards" fill="#94a3b8">4011a1: 48 89 e5              mov    rbp,rsp</text>
+<text x="50" y="438" class="l" style="animation:show .01s 8.37s forwards" fill="#94a3b8">4011a4: 48 83 ec 20           sub    rsp,0x20</text>
+<text x="28" y="490" class="l" style="animation:show .01s 8.94s forwards"><tspan fill="#ff0044">❯</tspan></text><text x="50" y="490" class="l ty" style="animation:show .01s 8.94s forwards,type 2.20s steps(53) 8.94s forwards" fill="#e5e7eb">revkit annotate crackme.elf --ai --function check_key</text>
+<text x="50" y="516" class="l" style="animation:show .01s 11.44s forwards" fill="#94a3b8">Querying local LLM (llama3.2)...</text>
+<g class="l" style="animation:show .01s 11.66s forwards"><text x="28" y="542" fill="#ff0044">❯</text><rect class="cur" x="50" y="527" width="10" height="18" fill="#e5e7eb"/></g>
+</svg>
