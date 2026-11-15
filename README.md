@@ -90,7 +90,7 @@ Reconstructs stripped symbols and imports with FLIRT-style matching
 
 ## 📦 Installation
 
-Requires Python 3.9+ and (optionally) an Ollama instance with a code model for AI features.
+Requires Python 3.9+, matplotlib (for CFG visualization) and (optionally) an Ollama instance with a code model for AI features.
 
 ```bash
 pip install revkit
