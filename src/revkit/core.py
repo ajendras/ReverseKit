@@ -1,11 +1,12 @@
 """Core module providing the Binary abstraction using LIEF.
 
 This is the foundation of RevKit. Handles loading of multiple binary formats
-(ELF, PE, Mach-O, DEX), metadata extraction, string scanning, entropy calculation
+(ELF, PE, Mach-O, DEX, RAW), metadata extraction, string scanning, entropy calculation
 and memory access for disassembly.
 
 Dedicated native parsers (MachOParser, DEXParser) provide format-specific
-handling while reusing LIEF where possible.
+handling while reusing LIEF where possible. RAW format is used for flat
+binaries, shellcode and files that LIEF cannot parse (e.g. empty files).
 """
 
 from __future__ import annotations
@@ -108,8 +109,9 @@ class Binary:
 
     Wraps a LIEF parsed binary and augments it with common reverse engineering
     operations. Uses dedicated native parsers for Mach-O and DEX formats.
-    Designed to be passed between analysis modules (disasm, graph,
-    annotator, report).
+    Falls back to RAW mode for shellcode, flat binaries and files LIEF cannot
+    parse (including empty files). Designed to be passed between analysis
+    modules (disasm, graph, annotator, report).
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -120,30 +122,34 @@ class Binary:
 
         Raises:
             FileNotFoundError: If the file does not exist.
-            ValueError: If LIEF cannot parse the file.
+            ValueError: If the file cannot be parsed and is not a raw binary.
         """
         self.path = Path(path).resolve()
         if not self.path.is_file():
             raise FileNotFoundError(f"Binary not found or not a file: {self.path}")
 
+        self._strings: list[str] | None = None
+        self.parser: MachOParser | DEXParser | None = None
+
         try:
-            self._binary: Any = lief.parse(str(self.path))
-            if self._binary is None:
-                raise ValueError("LIEF returned None")
+            parsed = lief.parse(str(self.path))
+            if parsed is None:
+                self._binary = None
+                self.format = "RAW"
+                self.architecture = "unknown"
+            else:
+                self._binary = parsed
+                self.format = self._detect_format()
+                self.architecture = self._detect_architecture()
+                if self.format == "Mach-O":
+                    self.parser = MachOParser(self._binary)
+                elif self.format == "DEX":
+                    self.parser = DEXParser(self._binary)
         except Exception as exc:
             raise ValueError(
                 f"Failed to parse {self.path.name} with LIEF. "
                 f"Format may be unsupported or file corrupted: {exc}"
             ) from exc
-
-        self.format = self._detect_format()
-        self.architecture = self._detect_architecture()
-        self.parser: MachOParser | DEXParser | None = None
-        if self.format == "Mach-O":
-            self.parser = MachOParser(self._binary)
-        elif self.format == "DEX":
-            self.parser = DEXParser(self._binary)
-        self._strings: list[str] | None = None
 
     def _detect_format(self) -> str:
         """Return normalized format name based on LIEF type."""
@@ -153,8 +159,13 @@ class Binary:
             return "PE"
         if isinstance(self._binary, lief.MachO.Binary):
             return "Mach-O"
-        if isinstance(self._binary, lief.DEX.Binary):
-            return "DEX"
+        # Safe DEX check to avoid AttributeError on some LIEF builds (e.g. py3.11 CI)
+        try:
+            if isinstance(self._binary, lief.DEX.Binary):
+                return "DEX"
+        except AttributeError:
+            if "DEX" in str(type(self._binary)) or hasattr(self._binary, "dex_header"):
+                return "DEX"
         return "Unknown"
 
     def _detect_architecture(self) -> str:
@@ -174,11 +185,13 @@ class Binary:
                 return "arm"
             return "unknown"
 
-        if isinstance(self._binary, lief.DEX.Binary):
-            # DEX is bytecode; many Android DEXes target ARM devices.
-            # We default to arm but disassembly may need a dedicated DEX
-            # backend in a future version.
-            return "arm"
+        # Safe DEX check to avoid AttributeError on some LIEF builds (e.g. py3.11 CI)
+        try:
+            if isinstance(self._binary, lief.DEX.Binary):
+                return "arm"
+        except AttributeError:
+            if "DEX" in str(type(self._binary)) or hasattr(self._binary, "dex_header"):
+                return "arm"
 
         arch_map = {
             lief.ARCHITECTURES.X86_64: "x86_64",
@@ -207,8 +220,10 @@ class Binary:
     def entry_point(self) -> int:
         """Return the program entry point virtual address.
 
-        Delegates to native parser when available.
+        Delegates to native parser when available. RAW binaries return 0.
         """
+        if self.format == "RAW" or self._binary is None:
+            return 0
         if self.parser is not None and hasattr(self.parser, "entry_point"):
             return self.parser.entry_point()
         return getattr(self._binary, "entrypoint", 0)
@@ -216,8 +231,10 @@ class Binary:
     def sections(self) -> list[Any]:
         """Return all sections as LIEF section objects.
 
-        Uses native parser for Mach-O/DEX when present.
+        Uses native parser for Mach-O/DEX when present. RAW returns [].
         """
+        if self.format == "RAW" or self._binary is None:
+            return []
         if self.parser is not None and hasattr(self.parser, "sections"):
             return self.parser.sections()
         if hasattr(self._binary, "sections"):
@@ -227,8 +244,10 @@ class Binary:
     def symbols(self) -> list[Any]:
         """Return symbols from the binary (dynamic, static, exports).
 
-        Uses native parser for Mach-O/DEX when present.
+        Uses native parser for Mach-O/DEX when present. RAW returns [].
         """
+        if self.format == "RAW" or self._binary is None:
+            return []
         if self.parser is not None and hasattr(self.parser, "symbols"):
             return self.parser.symbols()
         symbols: list[Any] = []
@@ -295,43 +314,76 @@ class Binary:
         """Read bytes from a virtual address.
 
         Uses LIEF's virtual_address_to_offset when possible, falls back to
-        raw read for flat binaries. DEX uses file offset directly.
+        raw read for RAW binaries. DEX uses file offset directly.
+        Raises RuntimeError on read failures (e.g. beyond EOF on empty files).
+
+        Raises:
+            RuntimeError: If the requested bytes cannot be read.
         """
-        if self.format == "DEX":
-            # DEX uses file offsets for code items; treat VA as file offset
+        if size < 0:
+            raise ValueError("size must be non-negative")
+        if size == 0:
+            return b""
+
+        if self.format in ("RAW", "Unknown") or self._binary is None:
             with self.path.open("rb") as f:
                 f.seek(virtual_address)
-                return f.read(size)
+                data = f.read(size)
+            if len(data) < size:
+                raise RuntimeError(
+                    f"Failed to read {size} bytes at {hex(virtual_address)} "
+                    f"(only got {len(data)} bytes). File may be too small."
+                )
+            return data
+
+        if self.format == "DEX":
+            with self.path.open("rb") as f:
+                f.seek(virtual_address)
+                data = f.read(size)
+            if len(data) < size:
+                raise RuntimeError(f"Failed to read {size} bytes at {hex(virtual_address)}")
+            return data
 
         try:
-            # Prefer LIEF offset mapping (works for ELF, PE, Mach-O)
             if hasattr(self._binary, "virtual_address_to_offset"):
                 offset = self._binary.virtual_address_to_offset(virtual_address)
+                if offset is None or offset < 0:
+                    raise RuntimeError(f"Invalid virtual address: {hex(virtual_address)}")
                 with self.path.open("rb") as f:
                     f.seek(offset)
-                    return f.read(size)
-            # Alternative using section content if available
+                    data = f.read(size)
+                if len(data) < size:
+                    raise RuntimeError(
+                        f"Failed to read {size} bytes at {hex(virtual_address)}"
+                    )
+                return data
+
             for section in self.sections():
-                if (
-                    hasattr(section, "virtual_address")
-                    and section.virtual_address
-                    <= virtual_address
-                    < getattr(section, "virtual_size", getattr(section, "size", 0))
-                ):
-                    offset_in_section = virtual_address - section.virtual_address
+                if not hasattr(section, "virtual_address"):
+                    continue
+                va = getattr(section, "virtual_address", 0)
+                vsize = getattr(
+                    section, "virtual_size", getattr(section, "size", 0)
+                )
+                if va <= virtual_address < va + vsize:
+                    offset_in_section = virtual_address - va
                     content = bytes(section.content)
                     if offset_in_section + size <= len(content):
                         return content[
                             offset_in_section : offset_in_section + size
                         ]
-        except Exception:  # noqa: BLE001
-            # Fallback for raw binaries or when offset mapping fails
-            pass
+                    raise RuntimeError("Read exceeds section bounds")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot read {size} bytes at virtual address {hex(virtual_address)}"
+            ) from exc
 
-        # Last resort: treat VA as file offset (common for shellcode)
         with self.path.open("rb") as f:
             f.seek(virtual_address)
-            return f.read(size)
+            data = f.read(size)
+        if len(data) < size:
+            raise RuntimeError(f"Cannot read {size} bytes at {hex(virtual_address)}")
+        return data
 
     def entropy(self) -> float:
         """Compute Shannon entropy of the full binary file."""

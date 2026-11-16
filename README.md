@@ -39,7 +39,7 @@ Reverse engineering workflows are fragmented across Ghidra, radare2, custom scri
 <td align="center" valign="top" width="33%">
 🔄<br>
 <b>Universal Loader</b><br>
-Auto-detects and parses ELF, PE, Mach-O, DEX using LIEF with dedicated native parsers for Mach-O (segments/load commands) and DEX (classes/methods)
+Auto-detects and parses ELF, PE, Mach-O, DEX, and raw/flat binaries (including shellcode) using LIEF with dedicated native parsers for Mach-O (segments/load commands) and DEX (classes/methods)
 </td>
 <td align="center" valign="top" width="33%">
 ⚡<br>
@@ -207,7 +207,7 @@ flowchart TD
     Report --> Outputs[HTML / Markdown / JSON + embedded SVGs]
 ```
 
-The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser` and `DEXParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX). Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts.
+The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser` and `DEXParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX). Raw/flat binaries (including empty files and shellcode) are supported as format="RAW". Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts.
 
 ## 📁 Project structure
 
@@ -239,7 +239,7 @@ examples/
 pytest
 ```
 
-The test suite covers Binary loading, string extraction, symbol table parsing, entropy calculation, Capstone disassembly accuracy on known x86/ARM snippets, and mocked Ollama responses for annotation tests.
+The test suite covers Binary loading (including RAW binaries), string extraction, symbol table parsing, entropy calculation, Capstone disassembly accuracy on known x86/ARM snippets, and mocked Ollama responses for annotation tests.
 
 ## 📍 Roadmap
 
