@@ -3,6 +3,9 @@
 Provides a clean public API for loading binaries, disassembly, AI annotation,
 CFG generation and report creation. Designed for both interactive CLI use
 and as an importable library for automation pipelines.
+
+The Binary class now includes dedicated native parsers for Mach-O
+(segments, load commands) and Android DEX (classes, methods).
 """
 
 from __future__ import annotations

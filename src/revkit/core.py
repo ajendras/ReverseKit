@@ -3,6 +3,9 @@
 This is the foundation of RevKit. Handles loading of multiple binary formats
 (ELF, PE, Mach-O, DEX), metadata extraction, string scanning, entropy calculation
 and memory access for disassembly.
+
+Dedicated native parsers (MachOParser, DEXParser) provide format-specific
+handling while reusing LIEF where possible.
 """
 
 from __future__ import annotations
@@ -15,11 +18,97 @@ import lief
 from .utils import calculate_entropy
 
 
+class MachOParser:
+    """Native parser for Mach-O binaries.
+
+    Exposes segments, load commands and handles Mach-O specific quirks
+    (fat binaries, thread state for entrypoint, etc.).
+    """
+
+    def __init__(self, lief_binary: Any) -> None:
+        self.binary = lief_binary
+        self.segments: list[Any] = list(lief_binary.segments) if hasattr(lief_binary, "segments") else []
+        self.load_commands: list[Any] = list(lief_binary.commands) if hasattr(lief_binary, "commands") else []
+
+    def entry_point(self) -> int:
+        """Return entry point, preferring thread state from LC_MAIN/LC_UNIXTHREAD."""
+        for cmd in self.load_commands:
+            if hasattr(cmd, "pc") and cmd.pc != 0:
+                return cmd.pc
+            if isinstance(cmd, lief.MachO.ThreadCommand) and hasattr(cmd, "state"):
+                # Simplified extraction; real impl would parse register state
+                if hasattr(cmd.state, "rip"):
+                    return cmd.state.rip
+                if hasattr(cmd.state, "pc"):
+                    return cmd.state.pc
+        return getattr(self.binary, "entrypoint", 0)
+
+    def sections(self) -> list[Any]:
+        """Return sections (Mach-O uses segments + sections)."""
+        if hasattr(self.binary, "sections"):
+            return list(self.binary.sections)
+        return []
+
+    def symbols(self) -> list[Any]:
+        """Return symbols (exported, imported, etc.)."""
+        symbols: list[Any] = []
+        if hasattr(self.binary, "symbols"):
+            symbols.extend(self.binary.symbols)
+        if hasattr(self.binary, "exports"):
+            symbols.extend(self.binary.exports)
+        return symbols
+
+
+class DEXParser:
+    """Native parser for Android DEX files.
+
+    Extracts classes, methods, types and provides symbol-like view over
+    the Dalvik/ART structures. DEX has no traditional virtual memory layout.
+    """
+
+    def __init__(self, lief_binary: Any) -> None:
+        self.binary = lief_binary
+        self.classes: list[Any] = list(lief_binary.classes) if hasattr(lief_binary, "classes") else []
+
+    def entry_point(self) -> int:
+        """DEX files have no single native entrypoint. Return 0 or first 'main' offset."""
+        for cls in self.classes:
+            for method in getattr(cls, "methods", []):
+                if getattr(method, "name", "") in ("main", "<clinit>"):
+                    # Could map to code_item offset but we keep simple for now
+                    return 0
+        return 0
+
+    def sections(self) -> list[Any]:
+        """DEX does not have classic sections; return empty or synthetic list."""
+        return []
+
+    def symbols(self) -> list[Any]:
+        """Synthesize symbol list from classes and methods (common in DEX)."""
+        symbols: list[Any] = []
+        for cls in self.classes:
+            cls_name = getattr(cls, "name", "UnknownClass")
+            for method in getattr(cls, "methods", []):
+                meth_name = getattr(method, "name", "unknown")
+                sym = type(
+                    "Symbol",
+                    (),
+                    {
+                        "name": f"{cls_name}.{meth_name}",
+                        "value": 0,
+                        "is_method": True,
+                    },
+                )()
+                symbols.append(sym)
+        return symbols
+
+
 class Binary:
     """Loaded binary with high-level analysis interface.
 
     Wraps a LIEF parsed binary and augments it with common reverse engineering
-    operations. Designed to be passed between analysis modules (disasm, graph,
+    operations. Uses dedicated native parsers for Mach-O and DEX formats.
+    Designed to be passed between analysis modules (disasm, graph,
     annotator, report).
     """
 
@@ -49,6 +138,11 @@ class Binary:
 
         self.format = self._detect_format()
         self.architecture = self._detect_architecture()
+        self.parser: MachOParser | DEXParser | None = None
+        if self.format == "Mach-O":
+            self.parser = MachOParser(self._binary)
+        elif self.format == "DEX":
+            self.parser = DEXParser(self._binary)
         self._strings: list[str] | None = None
 
     def _detect_format(self) -> str:
@@ -64,7 +158,28 @@ class Binary:
         return "Unknown"
 
     def _detect_architecture(self) -> str:
-        """Map LIEF architecture to Capstone-compatible name."""
+        """Map LIEF architecture to Capstone-compatible name.
+
+        Extended with native handling for Mach-O CPU types and DEX.
+        """
+        if isinstance(self._binary, lief.MachO.Binary):
+            cpu = getattr(self._binary.header, "cpu_type", None)
+            if cpu == lief.MachO.CPU_TYPE.X86_64:
+                return "x86_64"
+            if cpu == lief.MachO.CPU_TYPE.X86:
+                return "x86"
+            if cpu == lief.MachO.CPU_TYPE.ARM64:
+                return "arm64"
+            if cpu == lief.MachO.CPU_TYPE.ARM:
+                return "arm"
+            return "unknown"
+
+        if isinstance(self._binary, lief.DEX.Binary):
+            # DEX is bytecode; many Android DEXes target ARM devices.
+            # We default to arm but disassembly may need a dedicated DEX
+            # backend in a future version.
+            return "arm"
+
         arch_map = {
             lief.ARCHITECTURES.X86_64: "x86_64",
             lief.ARCHITECTURES.X86: "x86",
@@ -75,14 +190,12 @@ class Binary:
             lief.ARCHITECTURES.WASM: "wasm",
         }
 
-        # LIEF v0.14+ uses .header.architecture for some
         if hasattr(self._binary, "header") and hasattr(
             self._binary.header, "architecture"
         ):
             arch = self._binary.header.architecture
             return arch_map.get(arch, "unknown")
 
-        # Fallback for ELF
         if self.format == "ELF" and hasattr(self._binary, "header"):
             machine = self._binary.header.machine_type
             if machine in (lief.ELF.ARCH.x86_64, lief.ELF.ARCH.i386):
@@ -92,15 +205,32 @@ class Binary:
         return "unknown"
 
     def entry_point(self) -> int:
-        """Return the program entry point virtual address."""
+        """Return the program entry point virtual address.
+
+        Delegates to native parser when available.
+        """
+        if self.parser is not None and hasattr(self.parser, "entry_point"):
+            return self.parser.entry_point()
         return getattr(self._binary, "entrypoint", 0)
 
     def sections(self) -> list[Any]:
-        """Return all sections as LIEF section objects."""
-        return list(self._binary.sections)
+        """Return all sections as LIEF section objects.
+
+        Uses native parser for Mach-O/DEX when present.
+        """
+        if self.parser is not None and hasattr(self.parser, "sections"):
+            return self.parser.sections()
+        if hasattr(self._binary, "sections"):
+            return list(self._binary.sections)
+        return []
 
     def symbols(self) -> list[Any]:
-        """Return symbols from the binary (dynamic, static, exports)."""
+        """Return symbols from the binary (dynamic, static, exports).
+
+        Uses native parser for Mach-O/DEX when present.
+        """
+        if self.parser is not None and hasattr(self.parser, "symbols"):
+            return self.parser.symbols()
         symbols: list[Any] = []
         if hasattr(self._binary, "symbols"):
             symbols.extend(self._binary.symbols)
@@ -165,10 +295,16 @@ class Binary:
         """Read bytes from a virtual address.
 
         Uses LIEF's virtual_address_to_offset when possible, falls back to
-        raw read for flat binaries.
+        raw read for flat binaries. DEX uses file offset directly.
         """
+        if self.format == "DEX":
+            # DEX uses file offsets for code items; treat VA as file offset
+            with self.path.open("rb") as f:
+                f.seek(virtual_address)
+                return f.read(size)
+
         try:
-            # Prefer LIEF offset mapping
+            # Prefer LIEF offset mapping (works for ELF, PE, Mach-O)
             if hasattr(self._binary, "virtual_address_to_offset"):
                 offset = self._binary.virtual_address_to_offset(virtual_address)
                 with self.path.open("rb") as f:

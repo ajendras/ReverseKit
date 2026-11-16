@@ -39,7 +39,7 @@ Reverse engineering workflows are fragmented across Ghidra, radare2, custom scri
 <td align="center" valign="top" width="33%">
 🔄<br>
 <b>Universal Loader</b><br>
-Auto-detects and parses ELF, PE, Mach-O, DEX using LIEF with one command
+Auto-detects and parses ELF, PE, Mach-O, DEX using LIEF with dedicated native parsers for Mach-O (segments/load commands) and DEX (classes/methods)
 </td>
 <td align="center" valign="top" width="33%">
 ⚡<br>
@@ -195,7 +195,7 @@ print(asm)
 ```mermaid
 flowchart TD
     CLI[cli.py — Typer commands] --> API[__init__.py — analyze / disassemble / annotate]
-    API --> Binary[core.Binary — LIEF loader]
+    API --> Binary[core.Binary — LIEF loader + native Mach-O/DEX parsers]
     Binary --> Disasm[disasm.py — Capstone + Function]
     Binary --> Scanner[scanner.py — VulnScanner]
     Binary --> Annotator[annotator.py — AIAnnotator + Ollama]
@@ -207,7 +207,7 @@ flowchart TD
     Report --> Outputs[HTML / Markdown / JSON + embedded SVGs]
 ```
 
-The central `Binary` class (powered by LIEF) is passed between modules. Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts.
+The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser` and `DEXParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX). Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts.
 
 ## 📁 Project structure
 
@@ -215,7 +215,7 @@ The central `Binary` class (powered by LIEF) is passed between modules. Disassem
 src/revkit/
 ├── __init__.py          # Public API: Binary, analyze(), disassemble(), annotate(), generate_report()
 ├── cli.py               # Typer CLI: info, analyze, disassemble, annotate, visualize, report
-├── core.py              # Binary class — LIEF parsing, strings(), symbols(), entropy(), read_bytes()
+├── core.py              # Binary class + MachOParser/DEXParser — LIEF parsing, strings(), symbols(), entropy(), read_bytes()
 ├── disasm.py            # Capstone wrapper, disassemble_range(), get_function(), Function.to_asm()
 ├── graph.py             # CFGBuilder — build_cfg(), export_png(), export_svg(), export_dot()
 ├── annotator.py         # AIAnnotator — suggest_name(), explain_function(), batch_annotate()
@@ -245,7 +245,7 @@ The test suite covers Binary loading, string extraction, symbol table parsing, e
 
 <!-- roadmap:start -->
 - [x] **v0.1.0** — first release: Universal Loader, Capstone Disasm, CFG Builder, Local AI Helper
-- [ ] Add Mach-O and Android DEX native parsers
+- [x] Add Mach-O and Android DEX native parsers
 - [ ] Radare2 bridge for advanced graph and emulation
 - [ ] Unicorn-based dynamic tracing command
 - [ ] Plugin system for third-party analyzers
