@@ -92,7 +92,7 @@ def disassemble_range(
     try:
         cs_arch, cs_mode = map_arch_to_capstone(arch)
     except ValueError as exc:
-        raise ValueError(f"Architecture '{arch}' is not supported by Capstone") from exc
+        raise ValueError(f"Unsupported architecture '{arch}' is not supported by Capstone") from exc
 
     md = Cs(cs_arch, cs_mode)
     md.detail = True

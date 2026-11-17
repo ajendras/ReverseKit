@@ -194,13 +194,13 @@ class Binary:
                 return "arm"
 
         arch_map = {
-            lief.ARCHITECTURES.X86_64: "x86_64",
-            lief.ARCHITECTURES.X86: "x86",
-            lief.ARCHITECTURES.ARM: "arm",
-            lief.ARCHITECTURES.ARM64: "arm64",
-            lief.ARCHITECTURES.MIPS: "mips",
-            lief.ARCHITECTURES.RISCV: "riscv",
-            lief.ARCHITECTURES.WASM: "wasm",
+            lief.ARCH.X86_64: "x86_64",
+            lief.ARCH.X86: "x86",
+            lief.ARCH.ARM: "arm",
+            lief.ARCH.ARM64: "arm64",
+            lief.ARCH.MIPS: "mips",
+            lief.ARCH.RISCV: "riscv",
+            lief.ARCH.WASM: "wasm",
         }
 
         if hasattr(self._binary, "header") and hasattr(
