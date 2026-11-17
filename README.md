@@ -48,8 +48,8 @@ Lightning-fast disassembly for x86, ARM, MIPS, RISC-V and WebAssembly
 </td>
 <td align="center" valign="top" width="33%">
 📈<br>
-<b>CFG Builder</b><br>
-Generates control-flow graphs with NetworkX and exports to PNG, DOT or SVG
+<b>Advanced CFG</b><br>
+Generates control-flow graphs with NetworkX. Uses Radare2 bridge for precise basic-block level graphs and ESIL emulation when available
 </td>
 </tr>
 <tr>
@@ -90,7 +90,7 @@ Reconstructs stripped symbols and imports with FLIRT-style matching
 
 ## 📦 Installation
 
-Requires Python 3.9+, matplotlib (for CFG visualization) and (optionally) an Ollama instance with a code model for AI features.
+Requires Python 3.9+, matplotlib (for CFG visualization) and (optionally) an Ollama instance with a code model for AI features. Radare2 + r2pipe are optional for the advanced graph and emulation bridge.
 
 ```bash
 pip install revkit
@@ -103,10 +103,17 @@ ollama pull codellama
 ollama serve
 ```
 
+For Radare2 support:
+
+```bash
+pip install r2pipe
+# install radare2 from https://rada.re
+```
+
 ## ⚡ Quick start
 
 ```bash
-revkit analyze firmware.bin --ai --report html --output report.html
+revkit analyze firmware.bin --ai --r2 --report html --output report.html
 ```
 
 Or via the Python API:
@@ -118,11 +125,12 @@ result = analyze(
     "firmware.bin",
     arch="auto",
     ai=True,
+    r2=True,
     report="html",
     output="report.html"
 )
 
-print(f"Entropy: {result['entropy']}, AI annotated: {result['ai_annotated']}")
+print(f"Entropy: {result['entropy']}, AI annotated: {result['ai_annotated']}, R2 enabled: {result['r2_enabled']}")
 ```
 
 ## 🧰 Usage
@@ -142,7 +150,7 @@ revkit disassemble sample.elf --function main --length 128
 Generate a control-flow graph:
 
 ```bash
-revkit visualize sample.elf --function main --output cfg.png --format png
+revkit visualize sample.elf --function main --output cfg.png --format png --r2
 ```
 
 <details>
@@ -180,12 +188,30 @@ print(asm)
 ```
 </details>
 
+<details>
+<summary>Radare2 bridge usage</summary>
+
+```python
+from revkit.core import Binary
+from revkit.r2bridge import R2Bridge
+
+binary = Binary("sample.elf")
+r2 = R2Bridge(binary)
+print("Advanced CFG nodes:", r2.advanced_cfg("main").number_of_nodes())
+
+emu = r2.emulate(binary.entry_point(), steps=20)
+print("Emulated PC:", hex(emu.get("registers", {}).get("rip", 0) or 0))
+r2.close()
+```
+</details>
+
 ## 🔧 Configuration
 
 | Option     | Default   | Description                                      |
 |------------|-----------|--------------------------------------------------|
 | `arch`     | `auto`    | Architecture hint passed to Capstone (x86, arm, riscv, auto) |
 | `ai`       | `False`   | Enable local Ollama annotation via AIAnnotator |
+| `r2`       | `False`   | Enable Radare2 bridge (requires r2pipe and radare2) for advanced features |
 | `report`   | `html`    | Report format — one of "html", "markdown", "json" |
 | `output`   | `None`    | Path to write report (CLI uses revkit_report.{fmt} by default) |
 | `model`    | `codellama` | Ollama model used by AIAnnotator.__init__ |
@@ -197,17 +223,19 @@ flowchart TD
     CLI[cli.py — Typer commands] --> API[__init__.py — analyze / disassemble / annotate]
     API --> Binary[core.Binary — LIEF loader + native Mach-O/DEX parsers]
     Binary --> Disasm[disasm.py — Capstone + Function]
+    Binary --> R2[R2Bridge — advanced graph + ESIL emulation]
     Binary --> Scanner[scanner.py — VulnScanner]
     Binary --> Annotator[annotator.py — AIAnnotator + Ollama]
     Annotator --> Binary
     Binary --> Graph[graph.py — CFGBuilder + NetworkX]
     Binary --> Report[report.py — ReportGenerator]
+    R2 --> Graph
     Graph --> Report
     Scanner --> Report
     Report --> Outputs[HTML / Markdown / JSON + embedded SVGs]
 ```
 
-The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser` and `DEXParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX). Raw/flat binaries (including empty files and shellcode) are supported as format="RAW". Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts.
+The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser` and `DEXParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX). Raw/flat binaries (including empty files and shellcode) are supported as format="RAW". Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts. When `r2=True` (or `binary.enable_r2()`), `R2Bridge` augments `CFGBuilder` with radare2's `aaa` + `afbJ` for accurate basic-block CFGs and ESIL emulation.
 
 ## 📁 Project structure
 
@@ -215,9 +243,10 @@ The central `Binary` class (powered by LIEF) is passed between modules. Dedicate
 src/revkit/
 ├── __init__.py          # Public API: Binary, analyze(), disassemble(), annotate(), generate_report()
 ├── cli.py               # Typer CLI: info, analyze, disassemble, annotate, visualize, report
-├── core.py              # Binary class + MachOParser/DEXParser — LIEF parsing, strings(), symbols(), entropy(), read_bytes()
+├── core.py              # Binary class + MachOParser/DEXParser — LIEF parsing, strings(), symbols(), entropy(), read_bytes(), enable_r2()
 ├── disasm.py            # Capstone wrapper, disassemble_range(), get_function(), Function.to_asm()
 ├── graph.py             # CFGBuilder — build_cfg(), export_png(), export_svg(), export_dot()
+├── r2bridge.py          # R2Bridge for advanced graph (afbJ) and emulation (ESIL)
 ├── annotator.py         # AIAnnotator — suggest_name(), explain_function(), batch_annotate()
 ├── scanner.py           # VulnScanner — detect_stack_smash(), find_anti_debug(), match_signatures()
 ├── report.py            # ReportGenerator — to_html(), to_markdown(), to_json()
@@ -226,7 +255,7 @@ src/revkit/
 
 tests/
 ├── conftest.py          # fixtures: sample_elf, mocked_ollama_response, temp_binary
-├── test_core.py         # Binary loader, strings, symbols, entropy
+├── test_core.py         # Binary loader, strings, symbols, entropy, R2Bridge integration
 └── test_disasm.py       # Capstone accuracy on x86/ARM snippets
 
 examples/
@@ -239,14 +268,14 @@ examples/
 pytest
 ```
 
-The test suite covers Binary loading (including RAW binaries), string extraction, symbol table parsing, entropy calculation, Capstone disassembly accuracy on known x86/ARM snippets, and mocked Ollama responses for annotation tests.
+The test suite covers Binary loading (including RAW binaries), string extraction, symbol table parsing, entropy calculation, Capstone disassembly accuracy on known x86/ARM snippets, mocked Ollama responses for annotation tests, and R2Bridge integration (with graceful fallback when r2pipe/radare2 is unavailable).
 
 ## 📍 Roadmap
 
 <!-- roadmap:start -->
 - [x] **v0.1.0** — first release: Universal Loader, Capstone Disasm, CFG Builder, Local AI Helper
 - [x] Add Mach-O and Android DEX native parsers
-- [ ] Radare2 bridge for advanced graph and emulation
+- [x] Radare2 bridge for advanced graph and emulation
 - [ ] Unicorn-based dynamic tracing command
 - [ ] Plugin system for third-party analyzers
 - [ ] FLIRT signature database downloader and matcher

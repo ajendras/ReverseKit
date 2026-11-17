@@ -130,6 +130,7 @@ class Binary:
 
         self._strings: list[str] | None = None
         self.parser: MachOParser | DEXParser | None = None
+        self.r2bridge: Any = None
 
         try:
             parsed = lief.parse(str(self.path))
@@ -393,6 +394,25 @@ class Binary:
             return calculate_entropy(data)
         except Exception:  # noqa: BLE001
             return 0.0
+
+    def enable_r2(self) -> Any | None:
+        """Enable Radare2 bridge if r2pipe is available.
+
+        Returns:
+            R2Bridge instance or None if unavailable.
+        """
+        if self.r2bridge is not None:
+            return self.r2bridge
+
+        try:
+            from .r2bridge import R2Bridge
+            self.r2bridge = R2Bridge(self, auto_analyze=True)
+            if not self.r2bridge.is_available():
+                self.r2bridge = None
+        except Exception:  # noqa: BLE001
+            self.r2bridge = None
+
+        return self.r2bridge
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ dependencies = [
     "rich>=13.7",
     "typer[all]>=0.9",
     "ollama>=0.2.0",
+    "r2pipe>=0.3.0",
 ]
 
 [project.scripts]

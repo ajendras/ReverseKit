@@ -19,6 +19,7 @@ from .disasm import disassemble_range
 from .annotator import AIAnnotator
 from .report import ReportGenerator
 from .graph import CFGBuilder
+from .r2bridge import R2Bridge
 
 try:
     __version__ = importlib.metadata.version("revkit")
@@ -31,6 +32,7 @@ __all__ = [
     "AIAnnotator",
     "CFGBuilder",
     "ReportGenerator",
+    "R2Bridge",
     "analyze",
     "disassemble",
     "annotate",
@@ -43,19 +45,23 @@ def analyze(
     *,
     arch: str = "auto",
     ai: bool = False,
+    r2: bool = False,
     report: str = "html",
     output: str | None = None,
 ) -> dict[str, Any]:
     """Run a complete analysis pipeline on a binary.
 
     Loads the binary via LIEF, performs disassembly, optionally annotates
-    functions and variables using a local Ollama model, then produces
+    functions and variables using a local Ollama model, optionally enables
+    the Radare2 bridge for advanced graphs and emulation, then produces
     a rich report.
 
     Args:
         path: Filesystem path to the binary (ELF, PE, Mach-O, DEX, etc.).
         arch: Architecture hint. "auto" uses LIEF detection mapped to Capstone.
         ai: Enable local LLM annotation (requires Ollama running with a model).
+        r2: Enable Radare2 bridge for advanced CFG and ESIL emulation
+            (requires r2pipe and radare2).
         report: Report format — one of "html", "markdown", "json".
         output: If provided, report is also written to this path.
 
@@ -71,6 +77,9 @@ def analyze(
         raise FileNotFoundError(f"Binary not found: {path}")
 
     binary = Binary(path)
+
+    if r2:
+        binary.enable_r2()
 
     if ai:
         annotator = AIAnnotator()
@@ -103,6 +112,7 @@ def analyze(
         "strings": len(binary.strings()),
         "entropy": round(binary.entropy(), 4),
         "ai_annotated": ai,
+        "r2_enabled": bool(getattr(binary, "r2bridge", None)),
         "report_format": report,
         "report": report_content,
     }

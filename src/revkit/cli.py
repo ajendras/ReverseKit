@@ -143,6 +143,9 @@ def cmd_analyze(
     ],
     arch: Annotated[str, typer.Option("--arch", "-a")] = "auto",
     ai: Annotated[bool, typer.Option("--ai", help="Enable local Ollama annotation")] = False,
+    r2: Annotated[
+        bool, typer.Option("--r2", help="Enable Radare2 bridge for advanced graph/emulation")
+    ] = False,
     report: Annotated[
         str, typer.Option("--report", "-r", help="Report format")
     ] = "html",
@@ -162,6 +165,7 @@ def cmd_analyze(
             str(binary),
             arch=arch,
             ai=ai,
+            r2=r2,
             report=report,
             output=str(out_path),
         )
@@ -172,6 +176,7 @@ def cmd_analyze(
         console.print(f"   Entry point : {result['entry_point']}")
         console.print(f"   Entropy     : {result['entropy']}")
         console.print(f"   AI annotated: {'yes' if result['ai_annotated'] else 'no'}")
+        console.print(f"   R2 enabled  : {'yes' if result.get('r2_enabled', False) else 'no'}")
         console.print(f"   Report      : [bold]{out_path}[/bold]")
         console.print()
 
@@ -267,12 +272,18 @@ def cmd_visualize(
     fmt: Annotated[
         str, typer.Option("--format", help="Export format (png, svg, dot)")
     ] = "png",
+    r2: Annotated[bool, typer.Option("--r2", help="Use Radare2 for advanced CFG")] = False,
 ) -> None:
     """Build and export a control-flow graph using NetworkX."""
     _print_header("CONTROL FLOW GRAPH")
     _validate_binary_path(binary)
 
     bin_obj = Binary(str(binary))
+    if r2:
+        bin_obj.enable_r2()
+        if getattr(bin_obj, "r2bridge", None) and getattr(bin_obj.r2bridge, "is_available", lambda: False)():
+            console.print("   [dim]Radare2 bridge activated for advanced CFG[/dim]")
+
     builder = CFGBuilder(bin_obj)
 
     try:

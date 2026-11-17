@@ -21,6 +21,8 @@ class CFGBuilder:
 
     Uses a simplified instruction-level CFG with jump detection.
     Designed to be embedded in HTML reports as SVG or saved as images.
+    When a Radare2 bridge is attached to the Binary (via enable_r2()),
+    delegates to the bridge for a more accurate basic-block aware CFG.
     """
 
     def __init__(self, binary: Binary) -> None:
@@ -37,9 +39,9 @@ class CFGBuilder:
     def build_cfg(self, function: str | int = "main") -> nx.DiGraph:
         """Construct a Control Flow Graph for a function.
 
-        Uses disassembly and simple jump analysis to create nodes and edges.
-        Basic blocks are approximated by instruction level for simplicity.
-        In a full implementation a proper basic-block recovery would be used.
+        Prefers Radare2 bridge (if attached and available) for accurate
+        basic-block level CFG. Otherwise falls back to instruction-level
+        analysis from Capstone.
 
         Args:
             function: Function name or address.
@@ -50,6 +52,14 @@ class CFGBuilder:
         Raises:
             ValueError: If function cannot be located.
         """
+        # Prefer Radare2 for advanced accurate CFG if enabled on binary
+        if (
+            hasattr(self.binary, "r2bridge")
+            and self.binary.r2bridge is not None
+            and getattr(self.binary.r2bridge, "is_available", lambda: False)()
+        ):
+            return self.binary.r2bridge.advanced_cfg(function)
+
         func = get_function(self.binary, function)
         G = nx.DiGraph(name=f"CFG_{func.name}")
 
