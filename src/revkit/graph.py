@@ -39,20 +39,17 @@ class CFGBuilder:
     def build_cfg(self, function: str | int = "main") -> nx.DiGraph:
         """Construct a Control Flow Graph for a function.
 
-        Prefers Radare2 bridge (if attached and available) for accurate
-        basic-block level CFG. Otherwise falls back to instruction-level
-        analysis from Capstone.
+        If Binary.r2bridge is available, uses R2Bridge.advanced_cfg for
+        precise basic-block graph. Otherwise builds a simple linear + branch
+        graph from Capstone disassembly.
 
         Args:
-            function: Function name or address.
+            function: Function name or address to graph.
 
         Returns:
-            NetworkX directed graph with address nodes and control-flow edges.
-
-        Raises:
-            ValueError: If function cannot be located.
+            A directed NetworkX graph of the control flow.
         """
-        # Prefer Radare2 for advanced accurate CFG if enabled on binary
+        # Delegate to R2 if available for better accuracy
         if (
             hasattr(self.binary, "r2bridge")
             and self.binary.r2bridge is not None
@@ -61,262 +58,158 @@ class CFGBuilder:
             return self.binary.r2bridge.advanced_cfg(function)
 
         func = get_function(self.binary, function)
-        G = nx.DiGraph(name=f"CFG_{func.name}")
+        G = nx.DiGraph(name=f"CFG_{function}")
 
         if not func.instructions:
-            G.add_node("entry", label="empty function")
+            G.add_node(func.address, label=func.name, type="entry")
             self._last_cfg = G
             return G
 
-        # Add nodes for each instruction
-        prev_node: str | None = None
+        addresses = []
         for insn in func.instructions:
-            node_id = hex(insn.address)
-            label = f"{hex(insn.address)}:\\n{insn.mnemonic} {insn.op_str}"
+            addr = insn.address
+            addresses.append(addr)
             G.add_node(
-                node_id,
-                label=label,
-                address=insn.address,
+                addr,
+                label=f"{insn.mnemonic} {insn.op_str}",
+                address=addr,
                 mnemonic=insn.mnemonic,
-                op_str=insn.op_str,
             )
-            if prev_node is not None:
-                G.add_edge(prev_node, node_id, label="fallthrough")
 
-            # Detect control flow change
-            if insn.mnemonic.lower() in {
-                "jmp",
-                "je",
-                "jne",
-                "jg",
-                "jl",
-                "jge",
-                "jle",
-                "ja",
-                "jb",
-                "jbe",
-                "jae",
-                "call",
-                "ret",
-                "b",
-                "bl",
-                "bx",
-            }:
-                op = insn.op_str.strip().split(",")[0]
-                if op.startswith("0x"):
-                    try:
+        # Add edges for sequential flow and detected branches
+        for i, insn in enumerate(func.instructions[:-1]):
+            curr = insn.address
+            next_addr = func.instructions[i + 1].address
+
+            # Default fallthrough
+            G.add_edge(curr, next_addr, type="fallthrough")
+
+            # Detect jumps
+            if insn.mnemonic.startswith("j") or insn.mnemonic in ("call", "b", "bl", "jmp", "br"):
+                try:
+                    # Try to parse target address from op_str
+                    op = insn.op_str.split(",")[-1].strip()
+                    if op.startswith("0x"):
                         target = int(op, 16)
-                        target_id = hex(target)
-                        G.add_node(
-                            target_id,
-                            label=f"{hex(target)}:\\n(target)",
-                        )
-                        G.add_edge(node_id, target_id, label=insn.mnemonic)
-                    except ValueError:
-                        pass
-            prev_node = node_id
+                        G.add_edge(curr, target, type="jump")
+                except (ValueError, IndexError):
+                    # Could not parse target, skip
+                    pass
 
         self._last_cfg = G
         return G
 
-    def export_png(self, path: str | Path) -> None:
-        """Render the CFG to a PNG image using matplotlib.
-
-        Uses project colours: black background, #ff0044 nodes/accents.
-        """
+    def export_png(self, output: str | Path) -> None:
+        """Export the CFG as a PNG image with project styling."""
         if self._last_cfg is None:
             self.build_cfg()
 
-        assert self._last_cfg is not None
-        G = self._last_cfg
+        path = Path(output)
+        plt.figure(figsize=(12, 8))
+        plt.style.use("dark_background")
 
-        plt.figure(figsize=(14, 9), facecolor="#111111")
-        pos = nx.spring_layout(G, seed=42, k=0.8)
+        pos = nx.spring_layout(self._last_cfg, seed=42, k=0.5)
 
         nx.draw_networkx_nodes(
-            G,
+            self._last_cfg,
             pos,
             node_color="#ff0044",
-            node_size=2200,
-            edgecolors="#111111",
-            linewidths=2,
+            node_size=600,
+            alpha=0.9,
         )
         nx.draw_networkx_edges(
-            G,
+            self._last_cfg,
             pos,
             edge_color="#ffffff",
             arrows=True,
-            arrowstyle="->",
-            arrowsize=18,
-            width=1.5,
+            arrowsize=15,
+            alpha=0.7,
         )
-
-        labels = nx.get_node_attributes(G, "label")
         nx.draw_networkx_labels(
-            G,
+            self._last_cfg,
             pos,
-            labels,
             font_size=7,
-            font_color="#111111",
-            font_family="monospace",
+            font_color="white",
             font_weight="bold",
         )
 
-        edge_labels = nx.get_edge_attributes(G, "label")
-        nx.draw_networkx_edge_labels(
-            G,
+        plt.title(f"Control Flow Graph — {self._last_cfg.name}", color="#ff0044", fontsize=14)
+        plt.axis("off")
+        plt.savefig(path, dpi=300, bbox_inches="tight", facecolor="#111111")
+        plt.close()
+
+    def export_svg(self, output: str | Path) -> None:
+        """Export the CFG as SVG (for HTML reports)."""
+        if self._last_cfg is None:
+            self.build_cfg()
+
+        path = Path(output).with_suffix(".svg")
+        plt.figure(figsize=(12, 8))
+        plt.style.use("dark_background")
+
+        pos = nx.spring_layout(self._last_cfg, seed=42, k=0.5)
+
+        nx.draw_networkx_nodes(
+            self._last_cfg,
             pos,
-            edge_labels,
-            font_size=6,
+            node_color="#ff0044",
+            node_size=700,
+        )
+        nx.draw_networkx_edges(
+            self._last_cfg, pos, edge_color="#ffffff", arrows=True, arrowsize=20
+        )
+        nx.draw_networkx_labels(
+            self._last_cfg,
+            pos,
+            font_size=8,
             font_color="#eeeeee",
-            bbox={"facecolor": "#111111", "edgecolor": "none", "alpha": 0.7},
         )
 
-        plt.title(
-            "REVKIT CONTROL FLOW GRAPH",
-            fontsize=22,
-            color="#ff0044",
-            pad=30,
-            fontweight="bold",
-        )
+        plt.title(f"CFG for {self._last_cfg.name}", color="#ff0044", fontsize=16)
         plt.axis("off")
-        plt.tight_layout()
-
-        out_path = Path(path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(
-            out_path,
-            dpi=280,
-            bbox_inches="tight",
-            facecolor="#111111",
-        )
+        plt.savefig(path, format="svg", bbox_inches="tight", facecolor="#111111")
         plt.close()
 
-    def export_svg(self, path: str | Path) -> None:
-        """Export CFG as SVG (vector format) with project monochrome styling."""
+    def export_dot(self, output: str | Path) -> None:
+        """Export CFG in Graphviz DOT format."""
         if self._last_cfg is None:
             self.build_cfg()
 
-        assert self._last_cfg is not None
-        G = self._last_cfg
+        path = Path(output).with_suffix(".dot")
+        try:
+            nx.nx_agraph.write_dot(self._last_cfg, path)
+        except Exception:  # fallback if agraph not available
+            with path.open("w") as f:
+                f.write("digraph CFG {\n")
+                f.write('    graph [bgcolor="#111111"]\n')
+                f.write('    node [color="#ff0044", fontcolor="#ffffff"]\n')
+                f.write('    edge [color="#ffffff"]\n')
+                for node, data in self._last_cfg.nodes(data=True):
+                    label = data.get("label", str(node))
+                    f.write(f'    {node} [label="{label}"];\n')
+                for u, v in self._last_cfg.edges():
+                    f.write(f"    {u} -> {v};\n")
+                f.write("}\n")
 
-        plt.figure(figsize=(16, 10), facecolor="#111111")
-        pos = nx.spring_layout(G, seed=42, k=0.8)
-
-        nx.draw_networkx_nodes(
-            G,
-            pos,
-            node_color="#ff0044",
-            node_size=1800,
-            edgecolors="#111111",
-            linewidths=1.5,
-        )
-        nx.draw_networkx_edges(
-            G,
-            pos,
-            edge_color="#ffffff",
-            arrows=True,
-            arrowstyle="->",
-            arrowsize=16,
-            width=1.2,
-        )
-
-        labels = nx.get_node_attributes(G, "label")
-        nx.draw_networkx_labels(
-            G,
-            pos,
-            labels,
-            font_size=7,
-            font_color="#111111",
-            font_family="monospace",
-            font_weight="bold",
-        )
-
-        plt.title(
-            "REVKIT CONTROL FLOW GRAPH",
-            fontsize=20,
-            color="#ff0044",
-            pad=25,
-            fontweight="bold",
-        )
-        plt.axis("off")
-        plt.tight_layout()
-
-        out_path = Path(path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(
-            out_path,
-            format="svg",
-            bbox_inches="tight",
-            facecolor="#111111",
-        )
-        plt.close()
-
-    def export_dot(self, path: str | Path) -> None:
-        """Export the graph in Graphviz DOT format (pure text, no extra deps)."""
-        if self._last_cfg is None:
-            self.build_cfg()
-
-        assert self._last_cfg is not None
-        G = self._last_cfg
-
-        dot_lines = [
-            "digraph RevKit_CFG {",
-            '    bgcolor="#111111";',
-            '    node [shape=box, style="filled,rounded", fillcolor="#ff0044", '
-            'fontcolor="#111111", fontname="monospace", fontsize=9];',
-            '    edge [color="#ff0044", fontcolor="#eeeeee", fontsize=8];',
-            "    rankdir=TB;",
-            "",
-        ]
-
-        for node, data in G.nodes(data=True):
-            label = data.get("label", str(node)).replace('"', '\\"').replace("\n", "\\n")
-            dot_lines.append(f'    "{node}" [label="{label}"];')
-
-        for u, v, data in G.edges(data=True):
-            label = data.get("label", "")
-            if label:
-                dot_lines.append(f'    "{u}" -> "{v}" [label="{label}"];')
-            else:
-                dot_lines.append(f'    "{u}" -> "{v}";')
-
-        dot_lines.append("}")
-
-        out_path = Path(path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text("\n".join(dot_lines), encoding="utf-8")
-
-    def __repr__(self) -> str:
-        return f"<CFGBuilder binary={self.binary.path.name}>"
+    def last_cfg(self) -> nx.DiGraph | None:
+        """Return the most recently built CFG."""
+        return self._last_cfg
 
 
 if __name__ == "__main__":
-    # Runnable example that creates a small CFG and exports all formats
+    # Demo
     import tempfile
     from pathlib import Path
 
-    shellcode = (
-        b"\x48\x31\xc0\x50\x48\xbf\x2f\x62\x69\x6e\x2f\x2f\x73\x68\x57"
-        b"\x48\x89\xe7\x50\x57\x48\x89\xe6\x48\x31\xd2\xb0\x3b\x0f\x05"
-    )
+    shellcode = b"\x55\x48\x89\xe5\x48\x83\xec\x10\xb8\x01\x00\x00\x00\xc3"
     with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
         f.write(shellcode)
-        tmp_path = f.name
-
-    tmp_dir = Path(tempfile.mkdtemp())
+        tmp = f.name
     try:
-        binary = Binary(tmp_path)
-        builder = CFGBuilder(binary)
+        b = Binary(tmp)
+        builder = CFGBuilder(b)
         cfg = builder.build_cfg(0)
-        print(f"Built CFG with {cfg.number_of_nodes()} nodes, "
-              f"{cfg.number_of_edges()} edges")
-
-        builder.export_png(tmp_dir / "cfg.png")
-        builder.export_svg(tmp_dir / "cfg.svg")
-        builder.export_dot(tmp_dir / "cfg.dot")
-
-        print(f"Exports written to {tmp_dir}")
-        print("   ✓ PNG, SVG, DOT generated with #ff0044 accent")
+        print(f"Built CFG with {cfg.number_of_nodes()} nodes")
+        print("Success")
     finally:
-        Path(tmp_path).unlink(missing_ok=True)
+        Path(tmp).unlink(missing_ok=True)
