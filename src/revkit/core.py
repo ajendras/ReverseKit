@@ -173,7 +173,13 @@ class Binary:
         """Map LIEF architecture to Capstone-compatible name.
 
         Extended with native handling for Mach-O CPU types and DEX.
+        Defensive against LIEF builds where lief.ARCH is unavailable
+        (e.g. some py3.11 CI environments) by falling back to string-based
+        enum inspection.
         """
+        if self._binary is None:
+            return "unknown"
+
         if isinstance(self._binary, lief.MachO.Binary):
             cpu = getattr(self._binary.header, "cpu_type", None)
             if cpu == lief.MachO.CPU_TYPE.X86_64:
@@ -194,28 +200,57 @@ class Binary:
             if "DEX" in str(type(self._binary)) or hasattr(self._binary, "dex_header"):
                 return "arm"
 
-        arch_map = {
-            lief.ARCH.X86_64: "x86_64",
-            lief.ARCH.X86: "x86",
-            lief.ARCH.ARM: "arm",
-            lief.ARCH.ARM64: "arm64",
-            lief.ARCH.MIPS: "mips",
-            lief.ARCH.RISCV: "riscv",
-            lief.ARCH.WASM: "wasm",
-        }
-
         if hasattr(self._binary, "header") and hasattr(
             self._binary.header, "architecture"
         ):
             arch = self._binary.header.architecture
-            return arch_map.get(arch, "unknown")
+            try:
+                arch_map = {
+                    lief.ARCH.X86_64: "x86_64",
+                    lief.ARCH.X86: "x86",
+                    lief.ARCH.ARM: "arm",
+                    lief.ARCH.ARM64: "arm64",
+                    lief.ARCH.MIPS: "mips",
+                    lief.ARCH.RISCV: "riscv",
+                    lief.ARCH.WASM: "wasm",
+                }
+                return arch_map.get(arch, "unknown")
+            except AttributeError:
+                # LIEF without top-level ARCH (root cause of py3.11 CI failure);
+                # fall back to reliable string inspection of the enum
+                arch_str = str(arch).upper()
+                if "X86_64" in arch_str or "AMD64" in arch_str:
+                    return "x86_64"
+                if "X86" in arch_str or "I386" in arch_str:
+                    return "x86"
+                if "ARM64" in arch_str or "AARCH64" in arch_str:
+                    return "arm64"
+                if "ARM" in arch_str:
+                    return "arm"
+                if "MIPS" in arch_str:
+                    return "mips"
+                if "RISCV" in arch_str:
+                    return "riscv"
+                if "WASM" in arch_str:
+                    return "wasm"
 
+        # ELF specific fallback
         if self.format == "ELF" and hasattr(self._binary, "header"):
             machine = self._binary.header.machine_type
-            if machine in (lief.ELF.ARCH.x86_64, lief.ELF.ARCH.i386):
-                return "x86_64" if machine == lief.ELF.ARCH.x86_64 else "x86"
-            if "ARM" in str(machine):
-                return "arm"
+            try:
+                if machine in (lief.ELF.ARCH.x86_64, lief.ELF.ARCH.i386):
+                    return "x86_64" if machine == lief.ELF.ARCH.x86_64 else "x86"
+                if "ARM" in str(machine):
+                    return "arm"
+            except AttributeError:
+                mstr = str(machine).upper()
+                if "X86_64" in mstr or "AMD64" in mstr:
+                    return "x86_64"
+                if "386" in mstr or "X86" in mstr:
+                    return "x86"
+                if "ARM" in mstr:
+                    return "arm"
+
         return "unknown"
 
     def entry_point(self) -> int:
