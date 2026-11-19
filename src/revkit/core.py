@@ -449,6 +449,39 @@ class Binary:
 
         return self.r2bridge
 
+    def trace(self, start: int | None = None, steps: int = 10000, trace_regs: bool = False) -> list[dict[str, Any]]:
+        """Perform dynamic execution tracing using Unicorn.
+
+        Requires the unicorn package. Emulates from entry_point (or custom start)
+        and returns a structured trace log. Best suited for flat binaries and
+        shellcode; complex PE/ELF may need additional syscall hooks.
+
+        Args:
+            start: Start virtual address (defaults to entry_point()).
+            steps: Maximum number of instructions to execute.
+            trace_regs: Capture register values after each instruction.
+
+        Returns:
+            List of dicts with address, instruction, bytes and optional registers.
+
+        Raises:
+            RuntimeError: Unicorn not available or emulation error.
+        """
+        if start is None:
+            start = self.entry_point()
+
+        try:
+            from .tracer import UnicornTracer
+            tracer = UnicornTracer()
+            return tracer.trace(self, start=start, steps=steps, trace_regs=trace_regs)
+        except ImportError as exc:
+            raise RuntimeError(
+                "Unicorn is required for dynamic tracing. "
+                "Install via: pip install unicorn"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(f"Dynamic tracing failed: {exc}") from exc
+
 
 if __name__ == "__main__":
     # Simple smoke test
@@ -461,5 +494,9 @@ if __name__ == "__main__":
         b = Binary(tmp_path)
         print(f"Format: {b.format}, Arch: {b.architecture}, EP: {hex(b.entry_point())}")
         print(f"Strings: {len(b.strings())}, Entropy: {b.entropy():.3f}")
+        trace_log = b.trace(steps=5)
+        print(f"Trace length: {len(trace_log)}")
+        if trace_log:
+            print("First trace entry:", trace_log[0])
     finally:
         Path(tmp_path).unlink()

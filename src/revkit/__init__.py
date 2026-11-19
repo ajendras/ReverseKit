@@ -6,6 +6,8 @@ and as an importable library for automation pipelines.
 
 The Binary class now includes dedicated native parsers for Mach-O
 (segments, load commands) and Android DEX (classes, methods).
+Dynamic tracing via Unicorn is also available through trace() and
+Binary.trace().
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from .annotator import AIAnnotator
 from .report import ReportGenerator
 from .graph import CFGBuilder
 from .r2bridge import R2Bridge
+from .tracer import UnicornTracer
 
 try:
     __version__ = importlib.metadata.version("revkit")
@@ -33,10 +36,12 @@ __all__ = [
     "CFGBuilder",
     "ReportGenerator",
     "R2Bridge",
+    "UnicornTracer",
     "analyze",
     "disassemble",
     "annotate",
     "generate_report",
+    "trace",
 ]
 
 
@@ -184,3 +189,35 @@ def generate_report(
         Path(output).write_text(str(content) if isinstance(content, dict) else content)
 
     return content
+
+
+def trace(
+    path: str,
+    start: int | None = None,
+    steps: int = 10000,
+    trace_regs: bool = False,
+) -> list[dict[str, Any]]:
+    """Run dynamic tracing with the Unicorn emulator.
+
+    Emulates code from the entry point (or a custom start address) and
+    returns a list of executed instructions. Optionally captures register
+    state at each step. Works best on flat binaries and shellcode.
+
+    Args:
+        path: Path to the binary or shellcode.
+        start: Virtual address to start emulation (default: entry point).
+        steps: Maximum number of instructions to emulate.
+        trace_regs: Whether to record CPU registers after each instruction.
+
+    Returns:
+        List of trace entries (address, instruction, optional registers).
+
+    Raises:
+        RuntimeError: If Unicorn is unavailable or emulation fails catastrophically.
+    """
+    if not Path(path).exists():
+        raise FileNotFoundError(f"Binary not found: {path}")
+
+    binary = Binary(path)
+    tracer = UnicornTracer()
+    return tracer.trace(binary, start=start, steps=steps, trace_regs=trace_regs)

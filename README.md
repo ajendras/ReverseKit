@@ -81,9 +81,9 @@ Importable API for scripting custom analysis pipelines and automation
 Advanced string extraction, decoding and cross-reference mapping
 </td>
 <td align="center" valign="top">
-🧩<br>
-<b>Symbol Recovery</b><br>
-Reconstructs stripped symbols and imports with FLIRT-style matching
+🚀<br>
+<b>Dynamic Tracing</b><br>
+Unicorn-based emulation with per-instruction and register tracing (x86/ARM)
 </td>
 </tr>
 </table>
@@ -114,12 +114,13 @@ pip install r2pipe
 
 ```bash
 revkit analyze firmware.bin --ai --r2 --report html --output report.html
+revkit trace firmware.bin --steps 500 --regs
 ```
 
 Or via the Python API:
 
 ```python
-from revkit import analyze
+from revkit import analyze, trace
 
 result = analyze(
     "firmware.bin",
@@ -130,7 +131,8 @@ result = analyze(
     output="report.html"
 )
 
-print(f"Entropy: {result['entropy']}, AI annotated: {result['ai_annotated']}, R2 enabled: {result['r2_enabled']}")
+log = trace("firmware.bin", steps=100, trace_regs=True)
+print(f"Traced {len(log)} instructions, first: {log[0]}")
 ```
 
 ## 🧰 Usage
@@ -151,6 +153,12 @@ Generate a control-flow graph:
 
 ```bash
 revkit visualize sample.elf --function main --output cfg.png --format png --r2
+```
+
+Dynamic tracing:
+
+```bash
+revkit trace crackme.bin --steps 200 --regs --output trace.json
 ```
 
 <details>
@@ -205,16 +213,35 @@ r2.close()
 ```
 </details>
 
+<details>
+<summary>Dynamic tracing usage</summary>
+
+```python
+from revkit import trace
+from revkit.core import Binary
+
+log = trace("shellcode.bin", steps=50, trace_regs=True)
+for entry in log[:5]:
+    print(entry["address"], entry["instruction"])
+
+binary = Binary("shellcode.bin")
+trace_log = binary.trace(steps=100)
+print(f"Executed {len(trace_log)} instructions")
+```
+</details>
+
 ## 🔧 Configuration
 
-| Option     | Default   | Description                                      |
-|------------|-----------|--------------------------------------------------|
-| `arch`     | `auto`    | Architecture hint passed to Capstone (x86, arm, riscv, auto) |
-| `ai`       | `False`   | Enable local Ollama annotation via AIAnnotator |
-| `r2`       | `False`   | Enable Radare2 bridge (requires r2pipe and radare2) for advanced features |
-| `report`   | `html`    | Report format — one of "html", "markdown", "json" |
-| `output`   | `None`    | Path to write report (CLI uses revkit_report.{fmt} by default) |
-| `model`    | `codellama` | Ollama model used by AIAnnotator.__init__ |
+| Option       | Default   | Description                                      |
+|--------------|-----------|--------------------------------------------------|
+| `arch`       | `auto`    | Architecture hint passed to Capstone (x86, arm, riscv, auto) |
+| `ai`         | `False`   | Enable local Ollama annotation via AIAnnotator |
+| `r2`         | `False`   | Enable Radare2 bridge (requires r2pipe and radare2) for advanced features |
+| `report`     | `html`    | Report format — one of "html", "markdown", "json" |
+| `output`     | `None`    | Path to write report (CLI uses revkit_report.{fmt} by default) |
+| `model`      | `codellama` | Ollama model used by AIAnnotator.__init__ |
+| `steps`      | `10000`   | Maximum instructions to emulate in dynamic tracing |
+| `trace_regs` | `False`   | Log CPU registers on each instruction (Unicorn) |
 
 ## 🧩 Architecture
 
@@ -224,18 +251,20 @@ flowchart TD
     API --> Binary[core.Binary — LIEF loader + native Mach-O/DEX parsers]
     Binary --> Disasm[disasm.py — Capstone + Function]
     Binary --> R2[R2Bridge — advanced graph + ESIL emulation]
+    Binary --> Tracer[tracer.py — UnicornTracer for dynamic execution tracing]
     Binary --> Scanner[scanner.py — VulnScanner]
     Binary --> Annotator[annotator.py — AIAnnotator + Ollama]
     Annotator --> Binary
     Binary --> Graph[graph.py — CFGBuilder + NetworkX]
     Binary --> Report[report.py — ReportGenerator]
     R2 --> Graph
+    Tracer --> Binary
     Graph --> Report
     Scanner --> Report
     Report --> Outputs[HTML / Markdown / JSON + embedded SVGs]
 ```
 
-The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser` and `DEXParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX). Raw/flat binaries (including empty files and shellcode) are supported as format="RAW". Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts. When `r2=True` (or `binary.enable_r2()`), `R2Bridge` augments `CFGBuilder` with radare2's `aaa` + `afbJ` for accurate basic-block CFGs and ESIL emulation.
+The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser` and `DEXParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX). Raw/flat binaries (including empty files and shellcode) are supported as format="RAW". Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts. When `r2=True` (or `binary.enable_r2()`), `R2Bridge` augments `CFGBuilder` with radare2's `aaa` + `afbJ` for accurate basic-block CFGs and ESIL emulation. The new `UnicornTracer` (or `binary.trace()`) provides instruction-level dynamic execution tracing with optional register dumps.
 
 ## 📁 Project structure
 
@@ -250,6 +279,7 @@ src/revkit/
 ├── annotator.py         # AIAnnotator — suggest_name(), explain_function(), batch_annotate()
 ├── scanner.py           # VulnScanner — detect_stack_smash(), find_anti_debug(), match_signatures()
 ├── report.py            # ReportGenerator — to_html(), to_markdown(), to_json()
+├── tracer.py            # UnicornTracer — trace(), instruction + register logging
 ├── utils.py             # detect_format(), map_arch_to_capstone(), calculate_entropy()
 └── __version__          # dynamic via importlib.metadata
 
@@ -268,7 +298,7 @@ examples/
 pytest
 ```
 
-The test suite covers Binary loading (including RAW binaries), string extraction, symbol table parsing, entropy calculation, Capstone disassembly accuracy on known x86/ARM snippets, mocked Ollama responses for annotation tests, and R2Bridge integration (with graceful fallback when r2pipe/radare2 is unavailable).
+The test suite covers Binary loading (including RAW binaries), string extraction, symbol table parsing, entropy calculation, Capstone disassembly accuracy on known x86/ARM snippets, mocked Ollama responses for annotation tests, R2Bridge integration (with graceful fallback when r2pipe/radare2 is unavailable), and Unicorn tracing (skipped when unicorn is not installed).
 
 ## 📍 Roadmap
 
@@ -276,7 +306,7 @@ The test suite covers Binary loading (including RAW binaries), string extraction
 - [x] **v0.1.0** — first release: Universal Loader, Capstone Disasm, CFG Builder, Local AI Helper
 - [x] Add Mach-O and Android DEX native parsers
 - [x] Radare2 bridge for advanced graph and emulation
-- [ ] Unicorn-based dynamic tracing command
+- [x] Unicorn-based dynamic tracing command
 - [ ] Plugin system for third-party analyzers
 - [ ] FLIRT signature database downloader and matcher
 - [ ] Headless Ghidra integration for decompilation

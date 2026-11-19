@@ -22,6 +22,7 @@ from revkit import (
     annotate,
     disassemble,
     generate_report,
+    trace,
 )
 from revkit.annotator import AIAnnotator
 from revkit.core import Binary as CoreBinary
@@ -343,6 +344,70 @@ def cmd_report(
         console.print(f"[bold green]Report written[/bold green] → [bold]{out_path}[/bold]")
     except Exception as exc:  # noqa: BLE001
         console.print(f"[bold red]Report generation failed:[/bold red] {exc}")
+        raise typer.Exit(1) from exc
+
+
+@app.command("trace")
+def cmd_trace(
+    binary: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    start: Annotated[
+        int | None,
+        typer.Option("--start", "-s", help="Start address (default: entry point)"),
+    ] = None,
+    steps: Annotated[int, typer.Option("--steps", "-n", help="Max instructions to emulate")] = 10000,
+    regs: Annotated[bool, typer.Option("--regs", help="Record register state each step")] = False,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Output JSON trace log"),
+    ] = None,
+) -> None:
+    """Unicorn-based dynamic tracing of binary execution."""
+    _print_header("DYNAMIC TRACING")
+    _validate_binary_path(binary)
+
+    try:
+        console.print(f"Starting emulation (max {steps} steps, regs={regs})...\n")
+        trace_log = trace(
+            str(binary),
+            start=start,
+            steps=steps,
+            trace_regs=regs,
+        )
+
+        console.print(f"[bold green]✓ Traced {len(trace_log)} instructions[/bold green]")
+
+        # Show summary table
+        table = Table(title="Trace Preview (first 15 steps)")
+        table.add_column("Address", style="bold")
+        table.add_column("Instruction")
+        if regs:
+            table.add_column("Registers (summary)")
+
+        for entry in trace_log[:15]:
+            addr = entry.get("address", "???")
+            insn = entry.get("instruction", "???")
+            if regs:
+                reg_summary = ", ".join(
+                    f"{k}={hex(v)[:6]}..." for k, v in list(entry.get("registers", {}).items())[:3]
+                )
+                table.add_row(str(addr), insn, reg_summary)
+            else:
+                table.add_row(str(addr), insn)
+
+        console.print(table)
+
+        if output:
+            import json
+            out_path = output.with_suffix(".json") if not str(output).endswith(".json") else output
+            with out_path.open("w") as f:
+                json.dump({"trace": trace_log, "steps": len(trace_log)}, f, indent=2)
+            console.print(f"[bold]Full trace written[/bold] → {out_path}")
+
+        console.print("\n[dim]Tip: Use --regs for register dumps. Works best on flat binaries/shellcode.[/dim]")
+
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[bold red]Tracing failed:[/bold red] {exc}")
+        console.print("Make sure unicorn is installed and the binary is supported.")
         raise typer.Exit(1) from exc
 
 

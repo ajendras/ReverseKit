@@ -20,6 +20,7 @@ dependencies = [
     "typer[all]>=0.9",
     "ollama>=0.2.0",
     "r2pipe>=0.3.0",
+    "unicorn>=2.0.1",
 ]
 
 [project.scripts]
