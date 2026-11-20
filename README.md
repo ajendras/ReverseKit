@@ -27,6 +27,7 @@ Reverse engineering workflows are fragmented across Ghidra, radare2, custom scri
 - **Local AI only** — function renaming, variable suggestions and comments via Ollama (no cloud, no telemetry)
 - **Rich visuals** — CFG graphs, embedded SVGs, interactive HTML reports with zero external dependencies
 - **Python first** — import `Binary`, `analyze()`, `CFGBuilder` or `AIAnnotator` for custom automation pipelines
+- **Extensible** — plugin system for third-party analyzers via Python entry points
 
 ## 🎬 Demo
 
@@ -84,6 +85,13 @@ Advanced string extraction, decoding and cross-reference mapping
 🚀<br>
 <b>Dynamic Tracing</b><br>
 Unicorn-based emulation with per-instruction and register tracing (x86/ARM)
+</td>
+</tr>
+<tr>
+<td align="center" valign="top" colspan="3">
+🔌<br>
+<b>Plugin System for Third-Party Analyzers</b><br>
+Write custom analyzers by subclassing <code>revkit.Analyzer</code>, implement <code>.analyze(binary)</code>, and register them using the <code>revkit.analyzers</code> entry point in your pyproject.toml. Results are automatically included in reports and the analyze() dict.
 </td>
 </tr>
 </table>
@@ -230,6 +238,41 @@ print(f"Executed {len(trace_log)} instructions")
 ```
 </details>
 
+<details>
+<summary>Plugin system usage</summary>
+
+```python
+from revkit import analyze
+from revkit.plugin import Analyzer
+from revkit.core import Binary
+from revkit.utils import calculate_entropy
+
+
+class CustomVulnAnalyzer(Analyzer):
+    name = "custom_vuln"
+    description = "Looks for suspicious constants"
+
+    def analyze(self, binary: Binary) -> dict:
+        findings = []
+        for s in binary.strings():
+            if "password" in s.lower() or "secret" in s.lower():
+                findings.append(s)
+        return {
+            "suspicious_strings": findings,
+            "count": len(findings),
+        }
+
+
+# Register in your plugin package's pyproject.toml:
+# [project.entry-points."revkit.analyzers"]
+# custom_vuln = "myplugin.analyzers:CustomVulnAnalyzer"
+
+
+result = analyze("firmware.bin", plugins=["custom_vuln"])
+print(result["plugins"])
+```
+</details>
+
 ## 🔧 Configuration
 
 | Option       | Default   | Description                                      |
@@ -242,6 +285,7 @@ print(f"Executed {len(trace_log)} instructions")
 | `model`      | `codellama` | Ollama model used by AIAnnotator.__init__ |
 | `steps`      | `10000`   | Maximum instructions to emulate in dynamic tracing |
 | `trace_regs` | `False`   | Log CPU registers on each instruction (Unicorn) |
+| `plugins`    | `None`    | List of plugin names to execute (or all if omitted). Registered via entry points. |
 
 ## 🧩 Architecture
 
@@ -254,6 +298,7 @@ flowchart TD
     Binary --> Tracer[tracer.py — UnicornTracer for dynamic execution tracing]
     Binary --> Scanner[scanner.py — VulnScanner]
     Binary --> Annotator[annotator.py — AIAnnotator + Ollama]
+    Binary --> Plugins[plugin.py — Analyzer base, entry-point discovery]
     Annotator --> Binary
     Binary --> Graph[graph.py — CFGBuilder + NetworkX]
     Binary --> Report[report.py — ReportGenerator]
@@ -261,10 +306,11 @@ flowchart TD
     Tracer --> Binary
     Graph --> Report
     Scanner --> Report
+    Plugins --> Report
     Report --> Outputs[HTML / Markdown / JSON + embedded SVGs]
 ```
 
-The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser` and `DEXParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX). Raw/flat binaries (including empty files and shellcode) are supported as format="RAW". Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts. When `r2=True` (or `binary.enable_r2()`), `R2Bridge` augments `CFGBuilder` with radare2's `aaa` + `afbJ` for accurate basic-block CFGs and ESIL emulation. The new `UnicornTracer` (or `binary.trace()`) provides instruction-level dynamic execution tracing with optional register dumps.
+The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser` and `DEXParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX). Raw/flat binaries (including empty files and shellcode) are supported as format="RAW". Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts. When `r2=True` (or `binary.enable_r2()`), `R2Bridge` augments `CFGBuilder` with radare2's `aaa` + `afbJ` for accurate basic-block CFGs and ESIL emulation. The new `UnicornTracer` (or `binary.trace()`) provides instruction-level dynamic execution tracing with optional register dumps. The new plugin system lets third-party packages register `Analyzer` subclasses via the `revkit.analyzers` entry point; `analyze(..., plugins=[...])` runs them and merges results into the returned dictionary and reports.
 
 ## 📁 Project structure
 
@@ -277,6 +323,7 @@ src/revkit/
 ├── graph.py             # CFGBuilder — build_cfg(), export_png(), export_svg(), export_dot()
 ├── r2bridge.py          # R2Bridge for advanced graph (afbJ) and emulation (ESIL)
 ├── annotator.py         # AIAnnotator — suggest_name(), explain_function(), batch_annotate()
+├── plugin.py            # Analyzer ABC + get_analyzers() / run_plugins() via entry points
 ├── scanner.py           # VulnScanner — detect_stack_smash(), find_anti_debug(), match_signatures()
 ├── report.py            # ReportGenerator — to_html(), to_markdown(), to_json()
 ├── tracer.py            # UnicornTracer — trace(), instruction + register logging
@@ -298,7 +345,7 @@ examples/
 pytest
 ```
 
-The test suite covers Binary loading (including RAW binaries), string extraction, symbol table parsing, entropy calculation, Capstone disassembly accuracy on known x86/ARM snippets, mocked Ollama responses for annotation tests, R2Bridge integration (with graceful fallback when r2pipe/radare2 is unavailable), and Unicorn tracing (skipped when unicorn is not installed).
+The test suite covers Binary loading (including RAW binaries), string extraction, symbol table parsing, entropy calculation, Capstone disassembly accuracy on known x86/ARM snippets, mocked Ollama responses for annotation tests, R2Bridge integration (with graceful fallback when r2pipe/radare2 is unavailable), and Unicorn tracing (skipped when unicorn is not installed). New tests cover the plugin system (mocked entry points and custom Analyzer subclasses).
 
 ## 📍 Roadmap
 
@@ -307,7 +354,7 @@ The test suite covers Binary loading (including RAW binaries), string extraction
 - [x] Add Mach-O and Android DEX native parsers
 - [x] Radare2 bridge for advanced graph and emulation
 - [x] Unicorn-based dynamic tracing command
-- [ ] Plugin system for third-party analyzers
+- [x] Plugin system for third-party analyzers
 - [ ] FLIRT signature database downloader and matcher
 - [ ] Headless Ghidra integration for decompilation
 - [ ] WebAssembly and .NET binary support

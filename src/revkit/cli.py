@@ -147,6 +147,10 @@ def cmd_analyze(
     r2: Annotated[
         bool, typer.Option("--r2", help="Enable Radare2 bridge for advanced graph/emulation")
     ] = False,
+    plugins: Annotated[
+        list[str],
+        typer.Option("--plugin", "-p", help="Analyzer plugin name(s) to run (repeatable)"),
+    ] = [],
     report: Annotated[
         str, typer.Option("--report", "-r", help="Report format")
     ] = "html",
@@ -169,6 +173,7 @@ def cmd_analyze(
             r2=r2,
             report=report,
             output=str(out_path),
+            plugins=plugins if plugins else None,
         )
 
         console.print("[bold green]✓ Analysis completed successfully[/bold green]")
@@ -178,6 +183,7 @@ def cmd_analyze(
         console.print(f"   Entropy     : {result['entropy']}")
         console.print(f"   AI annotated: {'yes' if result['ai_annotated'] else 'no'}")
         console.print(f"   R2 enabled  : {'yes' if result.get('r2_enabled', False) else 'no'}")
+        console.print(f"   Plugins run : {result.get('plugin_count', 0)}")
         console.print(f"   Report      : [bold]{out_path}[/bold]")
         console.print()
 

@@ -7,7 +7,10 @@ and as an importable library for automation pipelines.
 The Binary class now includes dedicated native parsers for Mach-O
 (segments, load commands) and Android DEX (classes, methods).
 Dynamic tracing via Unicorn is also available through trace() and
-Binary.trace().
+Binary.trace(). The new plugin system (revkit.plugin.Analyzer) lets
+third-party packages register custom analyzers via the "revkit.analyzers"
+entry point group; they are executed by analyze(plugins=[...]) and their
+results are merged into the returned dictionary.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from .report import ReportGenerator
 from .graph import CFGBuilder
 from .r2bridge import R2Bridge
 from .tracer import UnicornTracer
+from .plugin import Analyzer, run_plugins
 
 try:
     __version__ = importlib.metadata.version("revkit")
@@ -37,6 +41,7 @@ __all__ = [
     "ReportGenerator",
     "R2Bridge",
     "UnicornTracer",
+    "Analyzer",
     "analyze",
     "disassemble",
     "annotate",
@@ -53,13 +58,14 @@ def analyze(
     r2: bool = False,
     report: str = "html",
     output: str | None = None,
+    plugins: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run a complete analysis pipeline on a binary.
 
     Loads the binary via LIEF, performs disassembly, optionally annotates
     functions and variables using a local Ollama model, optionally enables
-    the Radare2 bridge for advanced graphs and emulation, then produces
-    a rich report.
+    the Radare2 bridge for advanced graphs and emulation, optionally runs
+    registered third-party Analyzer plugins, then produces a rich report.
 
     Args:
         path: Filesystem path to the binary (ELF, PE, Mach-O, DEX, etc.).
@@ -69,9 +75,11 @@ def analyze(
             (requires r2pipe and radare2).
         report: Report format — one of "html", "markdown", "json".
         output: If provided, report is also written to this path.
+        plugins: Optional list of analyzer names to run (discovered via the
+            "revkit.analyzers" entry point group). If omitted, no plugins run.
 
     Returns:
-        Dictionary with analysis summary, statistics and report content.
+        Dictionary with analysis summary, statistics, plugin results and report content.
 
     Raises:
         FileNotFoundError: Binary does not exist.
@@ -89,6 +97,10 @@ def analyze(
     if ai:
         annotator = AIAnnotator()
         binary = annotator.batch_annotate(binary)
+
+    plugin_results: list[dict[str, Any]] = []
+    if plugins:
+        plugin_results = run_plugins(binary, plugins)
 
     generator = ReportGenerator(binary)
 
@@ -118,6 +130,8 @@ def analyze(
         "entropy": round(binary.entropy(), 4),
         "ai_annotated": ai,
         "r2_enabled": bool(getattr(binary, "r2bridge", None)),
+        "plugin_count": len(plugin_results),
+        "plugins": plugin_results,
         "report_format": report,
         "report": report_content,
     }

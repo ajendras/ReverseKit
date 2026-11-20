@@ -3,6 +3,9 @@
 Provides function naming, comment generation and batch annotation
 of binaries. Designed to integrate cleanly with Binary, Function
 and ReportGenerator.
+
+AIAnnotator now inherits from plugin.Analyzer so it can also be used
+as a registered plugin.
 """
 
 from __future__ import annotations
@@ -14,15 +17,19 @@ import ollama
 
 from .core import Binary
 from .disasm import Function, get_function
+from .plugin import Analyzer
 
 
-class AIAnnotator:
+class AIAnnotator(Analyzer):
     """Local LLM helper that queries Ollama for semantic understanding.
 
     Uses a code model (default: codellama) to suggest function names,
     variable names and add explanatory comments. Results are attached
     to the Binary instance for downstream consumers (reports, etc.).
     """
+
+    name = "ai_annotator"
+    description = "Local LLM for function renaming, comments and explanations"
 
     def __init__(self, model: str = "codellama") -> None:
         """Initialize annotator with an Ollama model.
@@ -189,6 +196,19 @@ class AIAnnotator:
                 continue
 
         return binary
+
+    def analyze(self, binary: Binary) -> dict[str, Any]:
+        """Plugin-compatible entry point. Runs batch annotation and returns summary.
+
+        The Binary is mutated in-place with annotations (consistent with
+        existing AIAnnotator behaviour).
+        """
+        annotated = self.batch_annotate(binary)
+        return {
+            "annotated_functions": len(getattr(annotated, "ai_annotations", {})),
+            "model_used": self.model,
+            "ai_annotated": True,
+        }
 
 
 if __name__ == "__main__":
