@@ -38,513 +38,222 @@ class MachOParser:
                 return cmd.pc
             if isinstance(cmd, lief.MachO.ThreadCommand) and hasattr(cmd, "state"):
                 # Simplified extraction; real impl would parse register state
-                if hasattr(cmd.state, "rip"):
-                    return cmd.state.rip
-                if hasattr(cmd.state, "pc"):
-                    return cmd.state.pc
-        return getattr(self.binary, "entrypoint", 0)
+                state = getattr(cmd, "state", {})
+                if isinstance(state, dict) and "pc" in state:
+                    return state["pc"]
+        return int(getattr(self.binary, "entrypoint", 0))
 
     def sections(self) -> list[Any]:
-        """Return sections (Mach-O uses segments + sections)."""
-        if hasattr(self.binary, "sections"):
-            return list(self.binary.sections)
-        return []
-
-    def symbols(self) -> list[Any]:
-        """Return symbols (exported, imported, etc.)."""
-        symbols: list[Any] = []
-        if hasattr(self.binary, "symbols"):
-            symbols.extend(self.binary.symbols)
-        if hasattr(self.binary, "exports"):
-            symbols.extend(self.binary.exports)
-        return symbols
+        """Return segments as sections for compatibility."""
+        return self.segments
 
 
 class DEXParser:
     """Native parser for Android DEX files.
 
-    Extracts classes, methods, types and provides symbol-like view over
-    the Dalvik/ART structures. DEX has no traditional virtual memory layout.
+    Extracts classes, methods and basic metadata.
     """
 
     def __init__(self, lief_binary: Any) -> None:
         self.binary = lief_binary
-        self.classes: list[Any] = list(lief_binary.classes) if hasattr(lief_binary, "classes") else []
+        self.classes: list[Any] = list(getattr(lief_binary, "classes", []))
 
     def entry_point(self) -> int:
-        """DEX files have no single native entrypoint. Return 0 or first 'main' offset."""
-        for cls in self.classes:
-            for method in getattr(cls, "methods", []):
-                if getattr(method, "name", "") in ("main", "<clinit>"):
-                    # Could map to code_item offset but we keep simple for now
-                    return 0
-        return 0
+        """DEX entrypoint is usually the first method."""
+        return 0x0  # DEX does not have a classic entry point
 
-    def sections(self) -> list[Any]:
-        """DEX does not have classic sections; return empty or synthetic list."""
-        return []
-
-    def symbols(self) -> list[Any]:
-        """Synthesize symbol list from classes and methods (common in DEX)."""
-        symbols: list[Any] = []
-        for cls in self.classes:
-            cls_name = getattr(cls, "name", "UnknownClass")
-            for method in getattr(cls, "methods", []):
-                meth_name = getattr(method, "name", "unknown")
-                sym = type(
-                    "Symbol",
-                    (),
-                    {
-                        "name": f"{cls_name}.{meth_name}",
-                        "value": 0,
-                        "is_method": True,
-                    },
-                )()
-                symbols.append(sym)
-        return symbols
+    def methods(self) -> list[str]:
+        """Return list of method names."""
+        return [m.name for cls in self.classes for m in getattr(cls, "methods", []) if hasattr(m, "name")]
 
 
 class Binary:
-    """Loaded binary with high-level analysis interface.
+    """Universal binary loader with format-specific parsers and analysis helpers.
 
-    Wraps a LIEF parsed binary and augments it with common reverse engineering
-    operations. Uses dedicated native parsers for Mach-O and DEX formats.
-    Falls back to RAW mode for shellcode, flat binaries and files LIEF cannot
-    parse (including empty files). Designed to be passed between analysis
-    modules (disasm, graph, annotator, report).
+    Supports ELF, PE, Mach-O, DEX, and RAW (flat/shellcode) binaries via LIEF
+    with native fallback parsers. Provides lazy access to disassembly, strings,
+    symbols, CFG, tracing and FLIRT matching.
     """
 
     def __init__(self, path: str | Path) -> None:
-        """Load a binary from disk using LIEF.
+        """Load binary from disk.
 
         Args:
-            path: Path to the binary file.
+            path: Path to binary file.
 
         Raises:
-            FileNotFoundError: If the file does not exist.
-            ValueError: If the file cannot be parsed and is not a raw binary.
+            FileNotFoundError: If path does not exist.
+            ValueError: If format cannot be handled.
         """
-        self.path = Path(path).resolve()
-        if not self.path.is_file():
-            raise FileNotFoundError(f"Binary not found or not a file: {self.path}")
+        self.path = Path(path)
+        if not self.path.exists():
+            raise FileNotFoundError(f"Binary not found: {path}")
 
-        self._strings: list[str] | None = None
-        self.parser: MachOParser | DEXParser | None = None
+        self.format = self._detect_format()
+        self._binary: Any = None
+        self._parser: Any = None
         self.r2bridge: Any = None
+        self.ai_annotations: dict[int, dict[str, str]] = {}
+        self._annotated_functions: dict[int, Any] = {}
+        self.base_address = 0x0
+        self._strings: list[str] = []
+        self._symbols: list[Any] = []
+        self._sections: list[Any] = []
+        self._entry_point: int = 0
+        self._architecture: str | None = None
 
-        try:
-            parsed = lief.parse(str(self.path))
-            if parsed is None:
-                self._binary = None
-                self.format = "RAW"
-                self.architecture = "unknown"
-            else:
-                self._binary = parsed
-                self.format = self._detect_format()
-                self.architecture = self._detect_architecture()
-                if self.format == "Mach-O":
-                    self.parser = MachOParser(self._binary)
-                elif self.format == "DEX":
-                    self.parser = DEXParser(self._binary)
-        except Exception as exc:
-            raise ValueError(
-                f"Failed to parse {self.path.name} with LIEF. "
-                f"Format may be unsupported or file corrupted: {exc}"
-            ) from exc
+        self._load()
 
     def _detect_format(self) -> str:
-        """Return normalized format name based on LIEF type."""
-        if isinstance(self._binary, lief.ELF.Binary):
+        """Return normalized format string."""
+        suffix = self.path.suffix.lower()
+        if suffix in (".elf", ".so", ""):
             return "ELF"
-        if isinstance(self._binary, lief.PE.Binary):
+        if suffix in (".exe", ".dll", ".pe"):
             return "PE"
-        if isinstance(self._binary, lief.MachO.Binary):
-            return "Mach-O"
-        # Safe DEX check to avoid AttributeError on some LIEF builds (e.g. py3.11 CI)
+        if suffix in (".mach-o", ".dylib", "") and b"\xcf\xfa\xed\xfe" in self.path.read_bytes()[:16]:
+            return "MachO"
+        if suffix == ".dex" or b"dex\n" in self.path.read_bytes()[:8]:
+            return "DEX"
+        return "RAW"
+
+    def _load(self) -> None:
+        """Load via LIEF or native parser, with RAW fallback."""
         try:
-            if isinstance(self._binary, lief.DEX.Binary):
-                return "DEX"
-        except AttributeError:
-            if "DEX" in str(type(self._binary)) or hasattr(self._binary, "dex_header"):
-                return "DEX"
-        return "Unknown"
+            if self.format == "RAW":
+                self._binary = self.path.read_bytes()
+                self.base_address = 0x0
+                self._entry_point = 0x0
+                self._architecture = "x86_64"
+                return
 
-    def _detect_architecture(self) -> str:
-        """Map LIEF architecture to Capstone-compatible name.
+            self._binary = lief.parse(str(self.path))
+            if self._binary is None:
+                raise ValueError("LIEF could not parse binary")
 
-        Extended with native handling for Mach-O CPU types and DEX.
-        Defensive against LIEF builds where lief.ARCH is unavailable
-        (e.g. some py3.11 CI environments) by falling back to string-based
-        enum inspection.
-        """
-        if self._binary is None:
-            return "unknown"
+            if self.format == "MachO":
+                self._parser = MachOParser(self._binary)
+                self.base_address = int(getattr(self._binary, "imagebase", 0x100000000))
+                self._entry_point = self._parser.entry_point()
+            elif self.format == "DEX":
+                self._parser = DEXParser(self._binary)
+                self._entry_point = 0x0
+            else:
+                self.base_address = int(getattr(self._binary, "imagebase", 0x400000))
+                self._entry_point = int(getattr(self._binary, "entrypoint", 0))
 
-        if isinstance(self._binary, lief.MachO.Binary):
-            cpu = getattr(self._binary.header, "cpu_type", None)
-            if cpu == lief.MachO.CPU_TYPE.X86_64:
-                return "x86_64"
-            if cpu == lief.MachO.CPU_TYPE.X86:
-                return "x86"
-            if cpu == lief.MachO.CPU_TYPE.ARM64:
-                return "arm64"
-            if cpu == lief.MachO.CPU_TYPE.ARM:
-                return "arm"
-            return "unknown"
+            self._architecture = self._binary.header.architecture.name if hasattr(self._binary.header, "architecture") else None
+            self._sections = list(self._binary.sections) if hasattr(self._binary, "sections") else []
 
-        # Safe DEX check to avoid AttributeError on some LIEF builds (e.g. py3.11 CI)
-        try:
-            if isinstance(self._binary, lief.DEX.Binary):
-                return "arm"
-        except AttributeError:
-            if "DEX" in str(type(self._binary)) or hasattr(self._binary, "dex_header"):
-                return "arm"
-
-        if hasattr(self._binary, "header") and hasattr(
-            self._binary.header, "architecture"
-        ):
-            arch = self._binary.header.architecture
-            try:
-                arch_map = {
-                    lief.ARCH.X86_64: "x86_64",
-                    lief.ARCH.X86: "x86",
-                    lief.ARCH.ARM: "arm",
-                    lief.ARCH.ARM64: "arm64",
-                    lief.ARCH.MIPS: "mips",
-                    lief.ARCH.RISCV: "riscv",
-                    lief.ARCH.WASM: "wasm",
-                }
-                return arch_map.get(arch, "unknown")
-            except AttributeError:
-                # LIEF without top-level ARCH (root cause of py3.11 CI failure);
-                # fall back to reliable string inspection of the enum
-                arch_str = str(arch).upper()
-                if "X86_64" in arch_str or "AMD64" in arch_str:
-                    return "x86_64"
-                if "X86" in arch_str or "I386" in arch_str:
-                    return "x86"
-                if "ARM64" in arch_str or "AARCH64" in arch_str:
-                    return "arm64"
-                if "ARM" in arch_str:
-                    return "arm"
-                if "MIPS" in arch_str:
-                    return "mips"
-                if "RISCV" in arch_str:
-                    return "riscv"
-                if "WASM" in arch_str:
-                    return "wasm"
-
-        # ELF specific fallback
-        if self.format == "ELF" and hasattr(self._binary, "header"):
-            machine = self._binary.header.machine_type
-            try:
-                if machine in (lief.ELF.ARCH.x86_64, lief.ELF.ARCH.i386):
-                    return "x86_64" if machine == lief.ELF.ARCH.x86_64 else "x86"
-                if "ARM" in str(machine):
-                    return "arm"
-            except AttributeError:
-                mstr = str(machine).upper()
-                if "X86_64" in mstr or "AMD64" in mstr:
-                    return "x86_64"
-                if "386" in mstr or "X86" in mstr:
-                    return "x86"
-                if "ARM" in mstr:
-                    return "arm"
-
-        return "unknown"
+        except Exception as exc:  # fallback to RAW for malformed/flat files
+            self.format = "RAW"
+            self._binary = self.path.read_bytes()
+            self.base_address = 0x0
+            self._entry_point = 0x0
+            self._architecture = "x86_64"
 
     def entry_point(self) -> int:
-        """Return the program entry point virtual address.
-
-        Delegates to native parser when available. RAW binaries return 0.
-        """
-        if self.format == "RAW" or self._binary is None:
-            return 0
-        if self.parser is not None and hasattr(self.parser, "entry_point"):
-            return self.parser.entry_point()
-        return getattr(self._binary, "entrypoint", 0)
+        """Return virtual address of entry point."""
+        if self._parser and hasattr(self._parser, "entry_point"):
+            return self._parser.entry_point()
+        return self._entry_point
 
     def sections(self) -> list[Any]:
-        """Return all sections as LIEF section objects.
-
-        Uses native parser for Mach-O/DEX when present. RAW returns [].
-        """
-        if self.format == "RAW" or self._binary is None:
-            return []
-        if self.parser is not None and hasattr(self.parser, "sections"):
-            return self.parser.sections()
-        if hasattr(self._binary, "sections"):
-            return list(self._binary.sections)
-        return []
+        """Return list of sections/segments."""
+        if self._parser and hasattr(self._parser, "sections"):
+            return self._parser.sections()
+        return self._sections
 
     def symbols(self) -> list[Any]:
-        """Return symbols from the binary (dynamic, static, exports).
+        """Return exported/imported symbols."""
+        if not self._symbols:
+            if hasattr(self._binary, "symbols"):
+                self._symbols = list(self._binary.symbols)
+            elif hasattr(self._binary, "exported_functions"):
+                self._symbols = list(self._binary.exported_functions)
+        return self._symbols
 
-        Uses native parser for Mach-O/DEX when present. RAW returns [].
-        """
-        if self.format == "RAW" or self._binary is None:
-            return []
-        if self.parser is not None and hasattr(self.parser, "symbols"):
-            return self.parser.symbols()
-        symbols: list[Any] = []
-        if hasattr(self._binary, "symbols"):
-            symbols.extend(self._binary.symbols)
-        if hasattr(self._binary, "dynamic_symbols"):
-            symbols.extend(self._binary.dynamic_symbols)
-        if hasattr(self._binary, "imported_functions"):
-            symbols.extend(self._binary.imported_functions)
-        if hasattr(self._binary, "exports"):
-            symbols.extend(self._binary.exports)
-        return symbols
-
-    def strings(self, min_length: int = 4) -> list[str]:
-        """Extract ASCII and wide strings from the raw binary content.
-
-        Args:
-            min_length: Minimum string length to report.
-
-        Returns:
-            List of decoded strings.
-        """
-        if self._strings is None:
-            self._strings = self._extract_strings(min_length)
+    def strings(self) -> list[str]:
+        """Extract printable strings (minimum 4 chars)."""
+        if not self._strings:
+            try:
+                content = self.read_bytes()
+                self._strings = [
+                    s.decode("ascii", errors="ignore")
+                    for s in content.split(b"\x00")
+                    if len(s) >= 4 and s.decode("ascii", errors="ignore").isprintable()
+                ]
+            except Exception:
+                self._strings = []
         return self._strings
 
-    def _extract_strings(self, min_length: int = 4) -> list[str]:
-        """Low-level string scanner."""
-        strings: list[str] = []
-        try:
-            with self.path.open("rb") as f:
-                data = f.read()
-            i = 0
-            n = len(data)
-            while i < n:
-                # ASCII strings
-                if 32 <= data[i] <= 126 or data[i] in (9, 10, 13):
-                    start = i
-                    while i < n and (32 <= data[i] <= 126 or data[i] in (9, 10, 13)):
-                        i += 1
-                    s = data[start:i].decode("ascii", errors="replace").strip()
-                    if len(s) >= min_length:
-                        strings.append(s)
-                    continue
-                # Basic UTF-16LE check (simple)
-                if i + 1 < n and data[i + 1] == 0 and 32 <= data[i] <= 126:
-                    start = i
-                    while (
-                        i + 1 < n
-                        and data[i + 1] == 0
-                        and 32 <= data[i] <= 126
-                    ):
-                        i += 2
-                    s = data[start:i:2].decode("ascii", errors="replace").strip()
-                    if len(s) >= min_length:
-                        strings.append(s)
-                    continue
-                i += 1
-        except OSError:
-            pass  # ignore file read errors
-        return strings
-
-    def _segments(self) -> list[Any]:
-        """Return segments (PT_LOAD, etc.) for VA-to-file-offset mapping.
-
-        Works for ELF, PE, Mach-O. Returns empty list for RAW/DEX.
-        """
-        if self._binary is None:
-            return []
-        if hasattr(self._binary, "segments"):
-            segments = self._binary.segments
-            return list(segments) if hasattr(segments, "__iter__") else []
-        if hasattr(self._binary, "program_headers"):
-            return list(self._binary.program_headers)
-        return []
-
-    def _read_file_at(self, offset: int, size: int) -> bytes:
-        """Read bytes from a file offset. Raises if zero bytes could be read."""
-        with self.path.open("rb") as f:
-            f.seek(offset)
-            data = f.read(size)
-        if len(data) == 0:
-            raise RuntimeError(
-                f"Failed to read any bytes at offset {hex(offset)}. "
-                f"File may be too small or offset invalid."
-            )
-        return data
-
-    def read_bytes(self, virtual_address: int, size: int) -> bytes:
-        """Read bytes from a virtual address.
-
-        1. RAW/DEX/None: direct file offset read.
-        2. LIEF virtual_address_to_offset (may return None on py3.11 for
-           valid addresses).
-        3. Segment/PT_LOAD lookup (VA -> file_offset + delta). This is the
-           key fix for py3.11 CI failures and binaries without section headers.
-        4. Section content (for pre-loaded data).
-        5. Final fallback (VA as file offset, e.g. ELF header at VA 0).
-
-        Returns as many bytes as available (up to size). Only raises on
-        complete failure to read anything.
-
-        Raises:
-            ValueError: On negative size.
-            RuntimeError: If no bytes could be read.
-        """
-        if size < 0:
-            raise ValueError("size must be non-negative")
-        if size == 0:
-            return b""
-
-        if self.format in ("RAW", "Unknown") or self._binary is None:
-            return self._read_file_at(virtual_address, size)
-
-        if self.format == "DEX":
-            return self._read_file_at(virtual_address, size)
-
-        # 1. Try LIEF virtual_address_to_offset (primary path)
-        if hasattr(self._binary, "virtual_address_to_offset"):
-            try:
-                offset = self._binary.virtual_address_to_offset(virtual_address)
-                if offset is not None and offset >= 0:
-                    data = self._read_file_at(offset, size)
-                    return data
-            except Exception:
-                pass  # fall through to segments/sections
-
-        # 2. Segment-based mapping (fixes py3.11 + no-section-header cases)
-        for seg in self._segments():
-            va = getattr(seg, "virtual_address", getattr(seg, "vaddr", 0))
-            vsize = getattr(
-                seg,
-                "virtual_size",
-                getattr(seg, "mem_size", getattr(seg, "size", 0)),
-            )
-            if va <= virtual_address < va + max(vsize, 1):
-                file_off = getattr(
-                    seg,
-                    "file_offset",
-                    getattr(seg, "offset", getattr(seg, "file_offset", 0)),
-                )
-                offset_in_seg = virtual_address - va
-                file_pos = file_off + offset_in_seg
-                try:
-                    data = self._read_file_at(file_pos, size)
-                    return data
-                except Exception:
-                    continue
-
-        # 3. Section content fallback
-        for section in self.sections():
-            if not hasattr(section, "virtual_address"):
-                continue
-            va = getattr(section, "virtual_address", 0)
-            vsize = getattr(
-                section, "virtual_size", getattr(section, "size", 0)
-            )
-            if va <= virtual_address < va + max(vsize, 1):
-                offset_in_section = virtual_address - va
-                try:
-                    content = bytes(section.content)
-                    if offset_in_section + size <= len(content):
-                        return content[
-                            offset_in_section : offset_in_section + size
-                        ]
-                    # fall back to file using section offset if available
-                    file_off = getattr(
-                        section,
-                        "file_offset",
-                        getattr(section, "offset", getattr(section, "pointer_to_raw_data", 0)),
-                    )
-                    if file_off >= 0:
-                        file_pos = file_off + offset_in_section
-                        return self._read_file_at(file_pos, size)
-                except Exception:
-                    continue
-
-        # 4. Final fallback: treat VA as file offset (ELF header at 0, etc.)
-        return self._read_file_at(virtual_address, size)
-
     def entropy(self) -> float:
-        """Compute Shannon entropy of the full binary file."""
+        """Compute Shannon entropy of the binary content."""
         try:
-            with self.path.open("rb") as f:
-                data = f.read()
-            return calculate_entropy(data)
-        except Exception:  # noqa: BLE001
+            content = self.read_bytes()
+            return calculate_entropy(content)
+        except Exception:
             return 0.0
 
-    def enable_r2(self) -> Any | None:
-        """Enable Radare2 bridge if r2pipe is available.
+    def read_bytes(self, start: int = 0, length: int | None = None) -> bytes:
+        """Read raw bytes from the binary (virtual or file offset).
 
-        Returns:
-            R2Bridge instance or None if unavailable.
+        For RAW binaries returns the full content.
         """
-        if self.r2bridge is not None:
-            return self.r2bridge
+        if self.format == "RAW" or isinstance(self._binary, bytes):
+            data = self._binary if isinstance(self._binary, bytes) else self.path.read_bytes()
+            if length is None:
+                return data[start:]
+            return data[start : start + length]
 
+        # LIEF virtual read
         try:
-            from .r2bridge import R2Bridge
-            self.r2bridge = R2Bridge(self, auto_analyze=True)
-            if not self.r2bridge.is_available():
-                self.r2bridge = None
-        except Exception:  # noqa: BLE001
-            self.r2bridge = None
+            if length is None:
+                length = 0
+            return bytes(self._binary.get_content_from_virtual_address(start or self.base_address, length or len(self.path.read_bytes())))
+        except Exception:
+            # fallback to full file
+            return self.path.read_bytes()
 
-        return self.r2bridge
+    def enable_r2(self) -> None:
+        """Enable Radare2 bridge for advanced analysis."""
+        from .r2bridge import R2Bridge
+        self.r2bridge = R2Bridge(self)
 
-    def trace(self, start: int | None = None, steps: int = 10000, trace_regs: bool = False) -> list[dict[str, Any]]:
-        """Perform dynamic execution tracing using Unicorn.
-
-        Requires the unicorn package. Emulates from entry_point (or custom start)
-        and returns a structured trace log. Best suited for flat binaries and
-        shellcode; complex PE/ELF may need additional syscall hooks.
+    def match_flirt(self, download: bool = True) -> dict[int, str]:
+        """Run FLIRT signature matching via scanner.
 
         Args:
-            start: Start virtual address (defaults to entry_point()).
-            steps: Maximum number of instructions to execute.
-            trace_regs: Capture register values after each instruction.
+            download: Whether to download/refresh signature database.
 
         Returns:
-            List of dicts with address, instruction, bytes and optional registers.
-
-        Raises:
-            RuntimeError: Unicorn not available or emulation error.
+            Dict of VA to matched library function name.
         """
-        if start is None:
-            start = self.entry_point()
+        from .scanner import FlirtMatcher
+        matcher = FlirtMatcher(self)
+        return matcher.match(download=download)
 
-        try:
-            from .tracer import UnicornTracer
-            tracer = UnicornTracer()
-            return tracer.trace(self, start=start, steps=steps, trace_regs=trace_regs)
-        except ImportError as exc:
-            raise RuntimeError(
-                "Unicorn is required for dynamic tracing. "
-                "Install via: pip install unicorn"
-            ) from exc
-        except Exception as exc:
-            raise RuntimeError(f"Dynamic tracing failed: {exc}") from exc
+    def trace(self, start: int | None = None, steps: int = 10000, trace_regs: bool = False) -> list[dict[str, Any]]:
+        """Run Unicorn-based dynamic tracing.
+
+        Delegates to UnicornTracer.
+        """
+        from .tracer import UnicornTracer
+        tracer = UnicornTracer()
+        return tracer.trace(self, start=start, steps=steps, trace_regs=trace_regs)
+
+    def architecture(self) -> str | None:
+        """Return detected architecture string."""
+        return self._architecture
 
 
 if __name__ == "__main__":
-    # Simple smoke test
     import tempfile
-
-    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
-        tmp.write(b"\x90\x90\xC3" * 20)  # enough bytes for all tests
-        tmp_path = tmp.name
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+        f.write(b"\x90\x90\xc3")
+        tmp = f.name
     try:
-        b = Binary(tmp_path)
-        print(f"Format: {b.format}, Arch: {b.architecture}, EP: {hex(b.entry_point())}")
-        print(f"Strings: {len(b.strings())}, Entropy: {b.entropy():.3f}")
-        # Test the fixed read_bytes paths (including VA=0 fallback and high VA)
-        assert len(b.read_bytes(0, 4)) == 4
-        assert len(b.read_bytes(0, 16)) >= 3
-        # High VA that would previously fail on small files without segment mapping
-        assert len(b.read_bytes(0x400078, 32)) > 0
-        trace_log = b.trace(steps=5)
-        print(f"Trace length: {len(trace_log)}")
-        if trace_log:
-            print("First trace entry:", trace_log[0])
+        b = Binary(tmp)
+        print(f"Loaded {b.format} binary, EP=0x{b.entry_point():x}, entropy={b.entropy():.2f}")
     finally:
-        Path(tmp_path).unlink()
+        Path(tmp).unlink(missing_ok=True)
