@@ -11,6 +11,10 @@ Binary.trace(). The new plugin system (revkit.plugin.Analyzer) lets
 third-party packages register custom analyzers via the "revkit.analyzers"
 entry point group; they are executed by analyze(plugins=[...]) and their
 results are merged into the returned dictionary.
+
+FLIRT support via FlirtMatcher (downloader + byte-pattern matcher for
+common library functions) is available through Binary.match_flirt(),
+VulnScanner, analyze(flirt=True) and the new match_flirt() helper.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from .graph import CFGBuilder
 from .r2bridge import R2Bridge
 from .tracer import UnicornTracer
 from .plugin import Analyzer, run_plugins
+from .scanner import FlirtMatcher, VulnScanner
 
 try:
     __version__ = importlib.metadata.version("revkit")
@@ -42,11 +47,14 @@ __all__ = [
     "R2Bridge",
     "UnicornTracer",
     "Analyzer",
+    "FlirtMatcher",
+    "VulnScanner",
     "analyze",
     "disassemble",
     "annotate",
     "generate_report",
     "trace",
+    "match_flirt",
 ]
 
 
@@ -56,6 +64,7 @@ def analyze(
     arch: str = "auto",
     ai: bool = False,
     r2: bool = False,
+    flirt: bool = False,
     report: str = "html",
     output: str | None = None,
     plugins: list[str] | None = None,
@@ -65,7 +74,8 @@ def analyze(
     Loads the binary via LIEF, performs disassembly, optionally annotates
     functions and variables using a local Ollama model, optionally enables
     the Radare2 bridge for advanced graphs and emulation, optionally runs
-    registered third-party Analyzer plugins, then produces a rich report.
+    FLIRT signature matching for library function identification, optionally
+    runs registered third-party Analyzer plugins, then produces a rich report.
 
     Args:
         path: Filesystem path to the binary (ELF, PE, Mach-O, DEX, etc.).
@@ -73,13 +83,16 @@ def analyze(
         ai: Enable local LLM annotation (requires Ollama running with a model).
         r2: Enable Radare2 bridge for advanced CFG and ESIL emulation
             (requires r2pipe and radare2).
+        flirt: Enable FLIRT signature database download + matching for
+            library function identification.
         report: Report format — one of "html", "markdown", "json".
         output: If provided, report is also written to this path.
         plugins: Optional list of analyzer names to run (discovered via the
             "revkit.analyzers" entry point group). If omitted, no plugins run.
 
     Returns:
-        Dictionary with analysis summary, statistics, plugin results and report content.
+        Dictionary with analysis summary, statistics, plugin results, FLIRT
+        matches and report content.
 
     Raises:
         FileNotFoundError: Binary does not exist.
@@ -101,6 +114,10 @@ def analyze(
     plugin_results: list[dict[str, Any]] = []
     if plugins:
         plugin_results = run_plugins(binary, plugins)
+
+    flirt_results: dict[int, str] = {}
+    if flirt:
+        flirt_results = binary.match_flirt()
 
     generator = ReportGenerator(binary)
 
@@ -130,6 +147,9 @@ def analyze(
         "entropy": round(binary.entropy(), 4),
         "ai_annotated": ai,
         "r2_enabled": bool(getattr(binary, "r2bridge", None)),
+        "flirt_enabled": flirt,
+        "flirt_matches": len(flirt_results),
+        "flirt": flirt_results,
         "plugin_count": len(plugin_results),
         "plugins": plugin_results,
         "report_format": report,
@@ -235,3 +255,23 @@ def trace(
     binary = Binary(path)
     tracer = UnicornTracer()
     return tracer.trace(binary, start=start, steps=steps, trace_regs=trace_regs)
+
+
+def match_flirt(path: str, download: bool = True) -> dict[int, str]:
+    """Run FLIRT signature matching on a binary.
+
+    Downloads the signature database (if requested) and returns a mapping
+    of addresses to identified library function names.
+
+    Args:
+        path: Path to the binary.
+        download: Whether to (re)download the FLIRT signature database.
+
+    Returns:
+        Dict mapping virtual addresses to matched library function names.
+    """
+    if not Path(path).exists():
+        raise FileNotFoundError(f"Binary not found: {path}")
+
+    binary = Binary(path)
+    return binary.match_flirt(download=download)

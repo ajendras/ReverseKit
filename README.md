@@ -62,7 +62,7 @@ Ollama integration renames functions, suggests variable names and adds comments
 <td align="center" valign="top">
 🔎<br>
 <b>Pattern Scanner</b><br>
-Detects common vulnerabilities, anti-debug tricks and library function signatures
+Detects common vulnerabilities, anti-debug tricks and library function signatures using FLIRT database downloader + matcher
 </td>
 <td align="center" valign="top">
 📋<br>
@@ -121,26 +121,30 @@ pip install r2pipe
 ## ⚡ Quick start
 
 ```bash
-revkit analyze firmware.bin --ai --r2 --report html --output report.html
+revkit analyze firmware.bin --ai --r2 --flirt --report html --output report.html
 revkit trace firmware.bin --steps 500 --regs
 ```
 
 Or via the Python API:
 
 ```python
-from revkit import analyze, trace
+from revkit import analyze, trace, match_flirt
 
 result = analyze(
     "firmware.bin",
     arch="auto",
     ai=True,
     r2=True,
+    flirt=True,
     report="html",
     output="report.html"
 )
 
 log = trace("firmware.bin", steps=100, trace_regs=True)
 print(f"Traced {len(log)} instructions, first: {log[0]}")
+
+flirt_matches = match_flirt("firmware.bin")
+print("FLIRT library functions:", len(flirt_matches))
 ```
 
 ## 🧰 Usage
@@ -273,6 +277,27 @@ print(result["plugins"])
 ```
 </details>
 
+<details>
+<summary>FLIRT matching usage</summary>
+
+```python
+from revkit.core import Binary
+from revkit.scanner import VulnScanner
+from revkit import match_flirt
+
+binary = Binary("libc_linked.bin")
+scanner = VulnScanner(binary)
+scanner.flirt.download()
+matches = scanner.match_flirt()
+print("Identified library functions:")
+for addr, name in matches.items():
+    print(f"  {hex(addr)} : {name}")
+
+# High-level API
+print(match_flirt("binary"))
+```
+</details>
+
 ## 🔧 Configuration
 
 | Option       | Default   | Description                                      |
@@ -280,6 +305,7 @@ print(result["plugins"])
 | `arch`       | `auto`    | Architecture hint passed to Capstone (x86, arm, riscv, auto) |
 | `ai`         | `False`   | Enable local Ollama annotation via AIAnnotator |
 | `r2`         | `False`   | Enable Radare2 bridge (requires r2pipe and radare2) for advanced features |
+| `flirt`      | `False`   | Enable FLIRT signature database matching for library function identification |
 | `report`     | `html`    | Report format — one of "html", "markdown", "json" |
 | `output`     | `None`    | Path to write report (CLI uses revkit_report.{fmt} by default) |
 | `model`      | `codellama` | Ollama model used by AIAnnotator.__init__ |
@@ -296,7 +322,7 @@ flowchart TD
     Binary --> Disasm[disasm.py — Capstone + Function]
     Binary --> R2[R2Bridge — advanced graph + ESIL emulation]
     Binary --> Tracer[tracer.py — UnicornTracer for dynamic execution tracing]
-    Binary --> Scanner[scanner.py — VulnScanner]
+    Binary --> Scanner[scanner.py — VulnScanner + FlirtMatcher]
     Binary --> Annotator[annotator.py — AIAnnotator + Ollama]
     Binary --> Plugins[plugin.py — Analyzer base, entry-point discovery]
     Annotator --> Binary
@@ -310,21 +336,21 @@ flowchart TD
     Report --> Outputs[HTML / Markdown / JSON + embedded SVGs]
 ```
 
-The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser` and `DEXParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX). Raw/flat binaries (including empty files and shellcode) are supported as format="RAW". Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts. When `r2=True` (or `binary.enable_r2()`), `R2Bridge` augments `CFGBuilder` with radare2's `aaa` + `afbJ` for accurate basic-block CFGs and ESIL emulation. The new `UnicornTracer` (or `binary.trace()`) provides instruction-level dynamic execution tracing with optional register dumps. The new plugin system lets third-party packages register `Analyzer` subclasses via the `revkit.analyzers` entry point; `analyze(..., plugins=[...])` runs them and merges results into the returned dictionary and reports.
+The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser` and `DEXParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX). Raw/flat binaries (including empty files and shellcode) are supported as format="RAW". Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts. When `r2=True` (or `binary.enable_r2()`), `R2Bridge` augments `CFGBuilder` with radare2's `aaa` + `afbJ` for accurate basic-block CFGs and ESIL emulation. The new `UnicornTracer` (or `binary.trace()`) provides instruction-level dynamic execution tracing with optional register dumps. The new plugin system lets third-party packages register `Analyzer` subclasses via the `revkit.analyzers` entry point; `analyze(..., plugins=[...])` runs them and merges results into the returned dictionary and reports. `FlirtMatcher` (integrated in `VulnScanner` and `Binary.match_flirt()`) downloads a signature database to `~/.cache/revkit/flirt` and performs masked byte-pattern matching on function prologues for common library identification (x86_64/ARM).
 
 ## 📁 Project structure
 
 ```text
 src/revkit/
-├── __init__.py          # Public API: Binary, analyze(), disassemble(), annotate(), generate_report()
+├── __init__.py          # Public API: Binary, analyze(), disassemble(), annotate(), generate_report(), match_flirt()
 ├── cli.py               # Typer CLI: info, analyze, disassemble, annotate, visualize, report
-├── core.py              # Binary class + MachOParser/DEXParser — LIEF parsing, strings(), symbols(), entropy(), read_bytes(), enable_r2()
+├── core.py              # Binary class + MachOParser/DEXParser — LIEF parsing, strings(), symbols(), entropy(), read_bytes(), enable_r2(), match_flirt()
 ├── disasm.py            # Capstone wrapper, disassemble_range(), get_function(), Function.to_asm()
 ├── graph.py             # CFGBuilder — build_cfg(), export_png(), export_svg(), export_dot()
 ├── r2bridge.py          # R2Bridge for advanced graph (afbJ) and emulation (ESIL)
 ├── annotator.py         # AIAnnotator — suggest_name(), explain_function(), batch_annotate()
 ├── plugin.py            # Analyzer ABC + get_analyzers() / run_plugins() via entry points
-├── scanner.py           # VulnScanner — detect_stack_smash(), find_anti_debug(), match_signatures()
+├── scanner.py           # VulnScanner + FlirtMatcher (downloader + byte pattern matcher for FLIRT sigs)
 ├── report.py            # ReportGenerator — to_html(), to_markdown(), to_json()
 ├── tracer.py            # UnicornTracer — trace(), instruction + register logging
 ├── utils.py             # detect_format(), map_arch_to_capstone(), calculate_entropy()
@@ -332,7 +358,7 @@ src/revkit/
 
 tests/
 ├── conftest.py          # fixtures: sample_elf, mocked_ollama_response, temp_binary
-├── test_core.py         # Binary loader, strings, symbols, entropy, R2Bridge integration
+├── test_core.py         # Binary loader, strings, symbols, entropy, R2Bridge integration, FlirtMatcher
 └── test_disasm.py       # Capstone accuracy on x86/ARM snippets
 
 examples/
@@ -345,7 +371,7 @@ examples/
 pytest
 ```
 
-The test suite covers Binary loading (including RAW binaries), string extraction, symbol table parsing, entropy calculation, Capstone disassembly accuracy on known x86/ARM snippets, mocked Ollama responses for annotation tests, R2Bridge integration (with graceful fallback when r2pipe/radare2 is unavailable), and Unicorn tracing (skipped when unicorn is not installed). New tests cover the plugin system (mocked entry points and custom Analyzer subclasses).
+The test suite covers Binary loading (including RAW binaries), string extraction, symbol table parsing, entropy calculation, Capstone disassembly accuracy on known x86/ARM snippets, mocked Ollama responses for annotation tests, R2Bridge integration (with graceful fallback when r2pipe/radare2 is unavailable), Unicorn tracing (skipped when unicorn is not installed), and the new FlirtMatcher (builtin signatures, download, matching). New tests cover `match_flirt()`, `VulnScanner.match_flirt(download=False)` and integration in `analyze(flirt=True)`. The plugin system (mocked entry points and custom Analyzer subclasses) is also tested.
 
 ## 📍 Roadmap
 
@@ -355,7 +381,7 @@ The test suite covers Binary loading (including RAW binaries), string extraction
 - [x] Radare2 bridge for advanced graph and emulation
 - [x] Unicorn-based dynamic tracing command
 - [x] Plugin system for third-party analyzers
-- [ ] FLIRT signature database downloader and matcher
+- [x] FLIRT signature database downloader and matcher
 - [ ] Headless Ghidra integration for decompilation
 - [ ] WebAssembly and .NET binary support
 - [ ] Parallel processing for large firmware images
