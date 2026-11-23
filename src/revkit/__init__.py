@@ -29,9 +29,15 @@ from .annotator import AIAnnotator
 from .report import ReportGenerator
 from .graph import CFGBuilder
 from .r2bridge import R2Bridge
-from .tracer import UnicornTracer
 from .plugin import Analyzer, run_plugins
 from .scanner import FlirtMatcher, VulnScanner
+
+# UnicornTracer is conditional to support test environments that simulate
+# a missing unicorn dependency without breaking module import.
+try:
+    from .tracer import UnicornTracer
+except ImportError:
+    UnicornTracer = None  # type: ignore[assignment]
 
 try:
     __version__ = importlib.metadata.version("revkit")
@@ -251,6 +257,12 @@ def trace(
     """
     if not Path(path).exists():
         raise FileNotFoundError(f"Binary not found: {path}")
+
+    if UnicornTracer is None:
+        raise RuntimeError(
+            "Unicorn is not installed. Dynamic tracing is unavailable. "
+            "Install with: pip install unicorn>=2.0.1"
+        )
 
     binary = Binary(path)
     tracer = UnicornTracer()

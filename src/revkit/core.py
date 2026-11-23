@@ -227,21 +227,54 @@ class Binary:
             download: Whether to download/refresh signature database.
 
         Returns:
-            Dict of VA to matched library function name.
+            Dict of VA to matched library function name (guaranteed to be str).
         """
         from .scanner import FlirtMatcher
         matcher = FlirtMatcher(self)
-        return matcher.match(download=download)
+        matches = matcher.match(download=download)
+        # Normalize names to str for JSON compatibility in reports/tests.
+        # FLIRT signature databases can return bytes for symbol names.
+        normalized: dict[int, str] = {}
+        for addr, name in matches.items():
+            if isinstance(name, bytes):
+                normalized[addr] = name.decode("utf-8", errors="replace")
+            elif isinstance(name, str):
+                normalized[addr] = name
+            else:
+                normalized[addr] = str(name)
+        return normalized
 
     def trace(self, start: int | None = None, steps: int = 10000, trace_regs: bool = False) -> list[dict[str, Any]]:
         """Run Unicorn-based dynamic tracing.
 
-        Delegates to UnicornTracer.
+        Delegates to UnicornTracer. Raises a clear RuntimeError if the
+        Unicorn engine is not available (supports test environments that
+        simulate missing dependencies).
+
+        Args:
+            start: Virtual address to start emulation (default: entry point).
+            steps: Maximum number of instructions to emulate.
+            trace_regs: Whether to record CPU registers after each instruction.
+
+        Returns:
+            List of trace entries (address, instruction, optional registers).
+
+        Raises:
+            RuntimeError: If Unicorn is unavailable or emulation fails.
         """
-        from .tracer import UnicornTracer
+        try:
+            from .tracer import UnicornTracer
+        except ImportError as exc:
+            raise RuntimeError(
+                "Unicorn engine is required for dynamic tracing. "
+                "Install with: pip install unicorn>=2.0.1"
+            ) from exc
+        if UnicornTracer is None:
+            raise RuntimeError("UnicornTracer is not available.")
         tracer = UnicornTracer()
         return tracer.trace(self, start=start, steps=steps, trace_regs=trace_regs)
 
+    @property
     def architecture(self) -> str | None:
         """Return detected architecture string."""
         return self._architecture
