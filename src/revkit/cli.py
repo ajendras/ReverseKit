@@ -23,6 +23,7 @@ from revkit import (
     disassemble,
     generate_report,
     trace,
+    decompile,
 )
 from revkit.annotator import AIAnnotator
 from revkit.core import Binary as CoreBinary
@@ -150,6 +151,9 @@ def cmd_analyze(
     flirt: Annotated[
         bool, typer.Option("--flirt", help="Enable FLIRT signature database matching")
     ] = False,
+    ghidra: Annotated[
+        bool, typer.Option("--ghidra", help="Enable headless Ghidra decompilation")
+    ] = False,
     plugins: Annotated[
         list[str],
         typer.Option("--plugin", "-p", help="Analyzer plugin name(s) to run (repeatable)"),
@@ -175,6 +179,7 @@ def cmd_analyze(
             ai=ai,
             r2=r2,
             flirt=flirt,
+            ghidra=ghidra,
             report=report,
             output=str(out_path),
             plugins=plugins if plugins else None,
@@ -188,6 +193,8 @@ def cmd_analyze(
         console.print(f"   AI annotated: {'yes' if result['ai_annotated'] else 'no'}")
         console.print(f"   R2 enabled  : {'yes' if result.get('r2_enabled', False) else 'no'}")
         console.print(f"   FLIRT matches: {result.get('flirt_matches', 0)}")
+        console.print(f"   Ghidra enabled: {'yes' if result.get('ghidra_enabled', False) else 'no'}")
+        console.print(f"   Decompiled  : {result.get('decompiled_functions', 0)}")
         console.print(f"   Plugins run : {result.get('plugin_count', 0)}")
         console.print(f"   Report      : [bold]{out_path}[/bold]")
         console.print()
@@ -419,6 +426,30 @@ def cmd_trace(
     except Exception as exc:  # noqa: BLE001
         console.print(f"[bold red]Tracing failed:[/bold red] {exc}")
         console.print("Make sure unicorn is installed and the binary is supported.")
+        raise typer.Exit(1) from exc
+
+
+@app.command("decompile")
+def cmd_decompile(
+    binary: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    function: Annotated[str, typer.Option("--function", "-f", help="Function to decompile")] = "main",
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+) -> None:
+    """Decompile a function to C using headless Ghidra."""
+    _print_header("GHIDRA DECOMPILATION")
+    _validate_binary_path(binary)
+
+    try:
+        console.print(f"Decompiling [bold]{function}[/bold]...\n")
+        code = decompile(str(binary), function=function)
+        console.print(code)
+
+        if output:
+            output.write_text(code)
+            console.print(f"\n[bold]Written to[/bold] {output}")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[bold red]Decompilation failed:[/bold red] {exc}")
+        console.print("Make sure GHIDRA_HOME is set and Ghidra is installed.")
         raise typer.Exit(1) from exc
 
 

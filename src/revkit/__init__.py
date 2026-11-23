@@ -15,6 +15,10 @@ results are merged into the returned dictionary.
 FLIRT support via FlirtMatcher (downloader + byte-pattern matcher for
 common library functions) is available through Binary.match_flirt(),
 VulnScanner, analyze(flirt=True) and the new match_flirt() helper.
+
+Headless Ghidra support via GhidraDecompiler (analyzeHeadless + embedded
+postScript) is available through Binary.enable_ghidra(), Binary.decompile(),
+analyze(ghidra=True) and the new decompile() helper.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from .graph import CFGBuilder
 from .r2bridge import R2Bridge
 from .plugin import Analyzer, run_plugins
 from .scanner import FlirtMatcher, VulnScanner
+from .ghidra import GhidraDecompiler
 
 # UnicornTracer is conditional to support test environments that simulate
 # a missing unicorn dependency without breaking module import.
@@ -55,12 +60,14 @@ __all__ = [
     "Analyzer",
     "FlirtMatcher",
     "VulnScanner",
+    "GhidraDecompiler",
     "analyze",
     "disassemble",
     "annotate",
     "generate_report",
     "trace",
     "match_flirt",
+    "decompile",
 ]
 
 
@@ -71,6 +78,7 @@ def analyze(
     ai: bool = False,
     r2: bool = False,
     flirt: bool = False,
+    ghidra: bool = False,
     report: str = "html",
     output: str | None = None,
     plugins: list[str] | None = None,
@@ -81,7 +89,8 @@ def analyze(
     functions and variables using a local Ollama model, optionally enables
     the Radare2 bridge for advanced graphs and emulation, optionally runs
     FLIRT signature matching for library function identification, optionally
-    runs registered third-party Analyzer plugins, then produces a rich report.
+    runs registered third-party Analyzer plugins, optionally enables headless
+    Ghidra decompilation, then produces a rich report.
 
     Args:
         path: Filesystem path to the binary (ELF, PE, Mach-O, DEX, etc.).
@@ -91,6 +100,7 @@ def analyze(
             (requires r2pipe and radare2).
         flirt: Enable FLIRT signature database download + matching for
             library function identification.
+        ghidra: Enable headless Ghidra decompilation (requires GHIDRA_HOME).
         report: Report format — one of "html", "markdown", "json".
         output: If provided, report is also written to this path.
         plugins: Optional list of analyzer names to run (discovered via the
@@ -98,7 +108,7 @@ def analyze(
 
     Returns:
         Dictionary with analysis summary, statistics, plugin results, FLIRT
-        matches and report content.
+        matches, decompiled functions and report content.
 
     Raises:
         FileNotFoundError: Binary does not exist.
@@ -124,6 +134,16 @@ def analyze(
     flirt_results: dict[int, str] = {}
     if flirt:
         flirt_results = binary.match_flirt()
+
+    ghidra_enabled = False
+    decompiled: dict[str, str] = {}
+    if ghidra:
+        binary.enable_ghidra()
+        ghidra_enabled = True
+        try:
+            decompiled["main"] = binary.decompile("main")
+        except Exception:  # noqa: BLE001
+            decompiled["main"] = "// decompilation failed"
 
     generator = ReportGenerator(binary)
 
@@ -156,6 +176,9 @@ def analyze(
         "flirt_enabled": flirt,
         "flirt_matches": len(flirt_results),
         "flirt": flirt_results,
+        "ghidra_enabled": ghidra_enabled,
+        "decompiled_functions": len(decompiled),
+        "decompiled": decompiled,
         "plugin_count": len(plugin_results),
         "plugins": plugin_results,
         "report_format": report,
@@ -287,3 +310,23 @@ def match_flirt(path: str, download: bool = True) -> dict[int, str]:
 
     binary = Binary(path)
     return binary.match_flirt(download=download)
+
+
+def decompile(path: str, function: str = "main") -> str:
+    """Decompile a function to C using headless Ghidra.
+
+    Requires Ghidra installed with GHIDRA_HOME set.
+
+    Args:
+        path: Path to the binary.
+        function: Function name or symbol to decompile.
+
+    Returns:
+        C pseudocode (or explanatory message if Ghidra unavailable).
+    """
+    if not Path(path).exists():
+        raise FileNotFoundError(f"Binary not found: {path}")
+
+    binary = Binary(path)
+    binary.enable_ghidra()
+    return binary.decompile(function)
