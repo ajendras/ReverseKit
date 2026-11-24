@@ -1,14 +1,14 @@
-"""Scanner for vulnerabilities, anti-debug tricks and FLIRT library signatures.
+"""Pattern scanner for vulnerabilities, anti-debug tricks and FLIRT signatures.
 
-VulnScanner provides detection for common issues (anti-debug, unsafe functions).
-FlirtMatcher downloads (or falls back to builtin) signatures and performs
-masked byte-pattern matching on executable code for library function
-identification. Signatures are cached under ~/.cache/revkit/flirt.
-Consistent with project style: type hints, full docstrings, graceful fallbacks.
+VulnScanner provides high-level methods for common binary issues.
+FlirtMatcher downloads (or uses builtins), caches, and matches short
+byte-patterns against executable code. Bytes are transparently
+base64-encoded for JSON cache compatibility.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -17,221 +17,174 @@ from .core import Binary
 
 
 class FlirtMatcher:
-    """Simplified FLIRT-style signature matcher with cache + byte pattern support.
+    """FLIRT-style signature matcher with cache in ~/.cache/revkit/flirt.
 
-    Uses a small set of builtin signatures for x86_64 (common libc entry points).
-    Real FLIRT .sig parsing is out of scope; this performs fast masked scans
-    on binary content.
+    Builtin signatures are always available; download() populates a JSON
+    cache (bytes patterns are stored as base64). match() returns
+    {virtual_address: library_function_name}.
     """
 
     def __init__(self, binary: Binary) -> None:
-        """Initialize matcher for a given binary.
-
-        Args:
-            binary: RevKit Binary instance.
-        """
+        """Initialize with a Binary and load builtin signatures."""
+        if not isinstance(binary, Binary):
+            raise TypeError("binary must be a revkit.Binary instance")
         self.binary = binary
         self.cache_dir = Path.home() / ".cache" / "revkit" / "flirt"
-        self.sig_path = self.cache_dir / "signatures.json"
         self.signatures: list[dict[str, Any]] = []
+        self._load_builtin()
 
-    def download(self, force: bool = False) -> bool:
-        """Ensure signature database is available in cache.
+    def _load_builtin(self) -> None:
+        """Populate a small set of common x86/ARM library signatures.
 
-        Uses builtin signatures (no external network dependency in CI/tests).
-        Cache is written to disk for subsequent runs.
-
-        Args:
-            force: Rebuild cache even if it exists.
-
-        Returns:
-            True if signatures are ready.
+        Patterns come from typical function prologues.
         """
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-        if self.sig_path.exists() and not force:
-            self._load()
-            return bool(self.signatures)
-
-        self.signatures = self._builtin_signatures()
-        self._save()
-        return True
-
-    def _builtin_signatures(self) -> list[dict[str, Any]]:
-        """Return builtin signatures for common library functions.
-
-        Patterns are exact byte sequences; masks allow future wildcard support.
-        Focused on x86_64 prologues for CTF / libc-linked binaries.
-        """
-        return [
-            {
-                "name": "__libc_start_main",
-                "pattern": b"\x48\x83\xec\x08\xe8",
-                "mask": b"\xff\xff\xff\xff\xff",
-                "arch": "x86_64",
-            },
+        self.signatures = [
             {
                 "name": "printf",
-                "pattern": b"\x55\x48\x89\xe5\x48\x83\xec\x10",
-                "mask": b"\xff\xff\xff\xff\xff\xff\xff\xff",
-                "arch": "x86_64",
+                "pattern": b"H\x83\xec\x08\xe8",
+                "mask": b"\xff\xff\xff\xff\xff",
+                "offset": 0,
             },
             {
-                "name": "puts",
-                "pattern": b"\x48\x8d\x3d",
-                "mask": b"\xff\xff\xff",
-                "arch": "x86_64",
+                "name": "__libc_start_main",
+                "pattern": b"\x48\x89\xe5\x48\x83",
+                "mask": b"\xff\xff\xff\xff\xff",
+                "offset": 0,
             },
             {
-                "name": "strlen",
-                "pattern": b"\x48\x89\xf8\x48\x8d\x50\x01",
-                "mask": b"\xff\xff\xff\xff\xff\xff\xff",
-                "arch": "x86_64",
+                "name": "malloc",
+                "pattern": b"\x55\x48\x89\xe5",
+                "mask": b"\xff\xff\xff\xff",
+                "offset": 0,
             },
             {
-                "name": "memcpy",
-                "pattern": b"\x48\x89\xf8\x48\x89\xd1\x48\x89\xc7",
-                "mask": b"\xff\xff\xff\xff\xff\xff\xff\xff",
-                "arch": "x86_64",
+                "name": "free",
+                "pattern": b"\x48\x85\xff\x74",
+                "mask": b"\xff\xff\xff\xff",
+                "offset": 0,
             },
         ]
 
-    def _load(self) -> None:
-        """Load signatures from JSON cache."""
-        try:
-            with self.sig_path.open("r", encoding="utf-8") as f:
-                self.signatures = json.load(f)
-        except (OSError, json.JSONDecodeError, TypeError):
-            self.signatures = self._builtin_signatures()
+    def download(self, force: bool = False) -> None:
+        """Ensure signatures are available in cache; force re-download.
+
+        For tests/CI we use the builtin set and immediately cache it.
+        Real implementation could fetch a larger database from a URL.
+        """
+        cache_file = self.cache_dir / "signatures.json"
+        if not force and cache_file.exists():
+            self._load()
+            return
+
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._load_builtin()
+        self._save()
 
     def _save(self) -> None:
-        """Write signatures to cache as JSON."""
-        try:
-            with self.sig_path.open("w", encoding="utf-8") as f:
-                json.dump(self.signatures, f, indent=2)
-        except OSError:
-            pass  # cache write is best-effort
+        """Write signatures to JSON cache. Bytes are base64-encoded."""
+        cache_file = self.cache_dir / "signatures.json"
 
-    def _match_pattern(self, data: bytes, pattern: bytes, mask: bytes) -> list[int]:
-        """Return all offsets where pattern matches data under the given mask.
+        class _BytesEncoder(json.JSONEncoder):
+            def default(self, o: Any) -> Any:
+                if isinstance(o, bytes):
+                    return {"__bytes__": base64.b64encode(o).decode("ascii")}
+                return super().default(o)
 
-        Mask bytes that are 0xFF must match exactly; 0x00 are wildcards.
-        """
-        matches: list[int] = []
-        if not pattern or len(pattern) != len(mask):
-            return matches
-        plen = len(pattern)
-        for i in range(len(data) - plen + 1):
-            if all(
-                (mask[j] == 0 or data[i + j] == pattern[j]) for j in range(plen)
-            ):
-                matches.append(i)
-        return matches
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(self.signatures, f, indent=2, cls=_BytesEncoder)
+
+    def _load(self) -> None:
+        """Load signatures from JSON cache, restoring bytes from base64."""
+        cache_file = self.cache_dir / "signatures.json"
+
+        def _object_hook(dct: dict[str, Any]) -> Any:
+            if "__bytes__" in dct:
+                return base64.b64decode(dct["__bytes__"])
+            return dct
+
+        with open(cache_file, encoding="utf-8") as f:
+            self.signatures = json.load(f, object_hook=_object_hook)
 
     def match(self, download: bool = True) -> dict[int, str]:
-        """Scan binary for signature matches.
+        """Return VA -> library function name for all matched signatures.
 
-        Args:
-            download: Ensure signatures are loaded first.
-
-        Returns:
-            Mapping of virtual address to matched library function name.
+        Uses full binary content for simple .find(); production code
+        would limit to executable sections.
         """
-        if download or not self.signatures:
+        if download:
             self.download()
 
         matches: dict[int, str] = {}
-        if not self.signatures:
-            return matches
-
-        # Obtain raw bytes via Binary API (full content for scanning)
         try:
             data = self.binary.read_bytes()
-            if not isinstance(data, bytes):
-                data = bytes(data)
-        except Exception:  # fallback for any Binary implementation detail
-            data = b""
-
-        if not data:
+        except Exception:  # noqa: BLE001
             return matches
 
-        # Determine base address for VA calculation
-        base_addr = getattr(self.binary, "base_address", 0)
-        if base_addr == 0 and hasattr(self.binary, "_binary"):
-            base_addr = getattr(self.binary._binary, "imagebase", 0x400000)
-        if base_addr == 0:
-            base_addr = getattr(self.binary, "entry_point", lambda: 0x400000)() & ~0xFFF
-
+        base = self.binary.base_address
         for sig in self.signatures:
-            pat = sig.get("pattern")
-            msk = sig.get("mask")
-            name = sig.get("name", "unknown")
-            if isinstance(pat, bytes) and isinstance(msk, bytes) and len(pat) == len(msk):
-                for offset in self._match_pattern(data, pat, msk):
-                    va = base_addr + offset
-                    if va not in matches:  # keep first match per signature
-                        matches[va] = name
-                    break  # one match per signature is enough for demo
-
+            pat = sig["pattern"]
+            pos = data.find(pat)
+            while pos != -1:
+                va = base + pos + sig.get("offset", 0)
+                matches[va] = sig["name"]
+                pos = data.find(pat, pos + 1)
         return matches
 
 
 class VulnScanner:
-    """High-level scanner for anti-debug, stack issues and FLIRT matching.
+    """High-level scanner for vulnerabilities and anti-debug patterns.
 
-    Integrates FlirtMatcher as .flirt attribute (per documented usage).
+    Also exposes FLIRT matching.
     """
 
     def __init__(self, binary: Binary) -> None:
-        """Initialize with a Binary instance.
-
-        Args:
-            binary: The binary to analyze.
-        """
+        """Attach to a Binary instance."""
+        if not isinstance(binary, Binary):
+            raise TypeError("binary must be a revkit.Binary instance")
         self.binary = binary
         self.flirt = FlirtMatcher(binary)
 
-    def find_anti_debug(self) -> list[str]:
-        """Scan strings and symbols for common anti-debugging indicators.
-
-        Returns:
-            List of matched anti-debug artifacts.
-        """
-        findings: list[str] = []
-        for s in self.binary.strings():
-            if isinstance(s, str) and any(
-                kw in s.lower() for kw in ("ptrace", "debugger", "antidebug", "isdebuggerpresent")
-            ):
-                findings.append(s)
+    def find_anti_debug(self) -> list[dict[str, Any]]:
+        """Look for common anti-debug techniques (ptrace, is_debugger_present)."""
+        findings: list[dict[str, Any]] = []
+        try:
+            content = self.binary.read_bytes()
+            if b"ptrace" in content or b"IsDebuggerPresent" in content:
+                findings.append({"type": "anti_debug", "description": "ptrace/debugger check"})
+        except Exception:  # noqa: BLE001
+            pass
         return findings
 
-    def detect_stack_smash(self) -> list[str]:
-        """Detect potential stack buffer overflow candidates (unsafe libc calls).
-
-        Returns:
-            List of suspicious function names found in symbols.
-        """
-        findings: list[str] = []
-        for sym in self.binary.symbols():
-            name = getattr(sym, "name", None)
-            if isinstance(name, str) and any(
-                unsafe in name.lower() for unsafe in ("strcpy", "gets", "sprintf", "scanf")
-            ):
-                findings.append(name)
+    def detect_stack_smash(self) -> list[dict[str, Any]]:
+        """Detect unsafe string functions that may allow stack smashing."""
+        findings: list[dict[str, Any]] = []
+        try:
+            content = self.binary.read_bytes()
+            for func in (b"gets", b"strcpy", b"strcat", b"sprintf"):
+                if func in content:
+                    findings.append({"type": "stack_smash", "function": func.decode("ascii", errors="replace")})
+        except Exception:  # noqa: BLE001
+            pass
         return findings
 
-    def match_flirt(self, download: bool = True) -> dict[int, str]:
-        """Delegate to FlirtMatcher.
-
-        Args:
-            download: Whether to (re)download signatures.
-
-        Returns:
-            Address-to-name map of identified library functions.
-        """
+    def match_flirt(self, download: bool = False) -> dict[int, str]:
+        """Run FLIRT matching (optionally downloading signatures first)."""
         return self.flirt.match(download=download)
 
 
 if __name__ == "__main__":
-    # Quick smoke test (requires a binary)
-    print("FlirtMatcher and VulnScanner loaded successfully")
+    # Smoke test
+    import tempfile
+
+    shellcode = b"H\x83\xec\x08\xe8\x12\x34\x56\x78\xc3"
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+        f.write(shellcode)
+        tmp = f.name
+    try:
+        b = Binary(tmp)
+        scanner = VulnScanner(b)
+        matches = scanner.match_flirt(download=True)
+        print(f"FLIRT matches: {len(matches)}")
+        print("Anti-debug:", len(scanner.find_anti_debug()))
+    finally:
+        Path(tmp).unlink(missing_ok=True)
