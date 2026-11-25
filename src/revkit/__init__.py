@@ -5,12 +5,13 @@ CFG generation and report creation. Designed for both interactive CLI use
 and as an importable library for automation pipelines.
 
 The Binary class now includes dedicated native parsers for Mach-O
-(segments, load commands) and Android DEX (classes, methods).
-Dynamic tracing via Unicorn is also available through trace() and
-Binary.trace(). The new plugin system (revkit.plugin.Analyzer) lets
-third-party packages register custom analyzers via the "revkit.analyzers"
-entry point group; they are executed by analyze(plugins=[...]) and their
-results are merged into the returned dictionary.
+(segments, load commands), Android DEX (classes, methods), WebAssembly
+(exports, sections) and .NET (metadata, methods). Dynamic tracing via
+Unicorn is also available through trace() and Binary.trace(). The new
+plugin system (revkit.plugin.Analyzer) lets third-party packages register
+custom analyzers via the "revkit.analyzers" entry point group; they are
+executed by analyze(plugins=[...]) and their results are merged into the
+returned dictionary.
 
 FLIRT support via FlirtMatcher (downloader + byte-pattern matcher for
 common library functions) is available through Binary.match_flirt(),
@@ -93,7 +94,8 @@ def analyze(
     Ghidra decompilation, then produces a rich report.
 
     Args:
-        path: Filesystem path to the binary (ELF, PE, Mach-O, DEX, etc.).
+        path: Filesystem path to the binary (ELF, PE, Mach-O, DEX, WASM,
+              .NET, etc.).
         arch: Architecture hint. "auto" uses LIEF detection mapped to Capstone.
         ai: Enable local LLM annotation (requires Ollama running with a model).
         r2: Enable Radare2 bridge for advanced CFG and ESIL emulation
@@ -198,7 +200,7 @@ def disassemble(
         path: Path to binary file.
         start: Virtual address to begin disassembly. Defaults to entry point.
         length: Number of bytes to disassemble.
-        arch: Architecture (x86, arm, riscv, etc.).
+        arch: Architecture (x86, arm, riscv, wasm, dotnet, etc.).
 
     Returns:
         Multi-line string containing disassembly with addresses and bytes.

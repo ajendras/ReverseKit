@@ -1,13 +1,14 @@
-"""Utility functions for RevKit."""
+"""Utility functions for RevKit.
+
+Includes format detection (now with WASM and DOTNET), architecture mapping
+for Capstone (including wasm and dotnet fallback) and entropy calculation.
+"""
 
 from __future__ import annotations
 
 import math
-from collections import Counter
 from pathlib import Path
 from typing import Any
-
-import lief
 
 from capstone import (
     CS_ARCH_ARM,
@@ -24,72 +25,65 @@ from capstone import (
 )
 
 
-def calculate_entropy(data: bytes) -> float:
-    """Compute Shannon entropy of the given bytes.
-
-    Returns 0.0 for empty input. Maximum is exactly 8.0 for uniform
-    distribution over all 256 byte values.
-    """
-    if not data:
-        return 0.0
-    counts = Counter(data)
-    length = len(data)
-    entropy = 0.0
-    for count in counts.values():
-        probability = count / length
-        entropy -= probability * math.log2(probability)
-    return entropy
-
-
 def detect_format(path: str | Path) -> str:
-    """Detect the format of a binary file.
+    """Detect binary format from magic bytes and extension.
 
-    Uses LIEF for structured formats, falls back to RAW for flat files
-    and files that LIEF cannot parse. Safe handling for DEX to avoid
-    AttributeError on some LIEF builds.
+    Supports all formats handled by Binary (including the new WASM and DOTNET).
     """
-    path = Path(path)
-    if not path.is_file():
-        return "unknown"
-    try:
-        parsed = lief.parse(str(path))
-        if parsed is None:
-            return "RAW"
-        if isinstance(parsed, lief.ELF.Binary):
-            return "ELF"
-        if isinstance(parsed, lief.PE.Binary):
-            return "PE"
-        if isinstance(parsed, lief.MachO.Binary):
-            return "Mach-O"
-        try:
-            if isinstance(parsed, lief.DEX.Binary):
-                return "DEX"
-        except AttributeError:
-            if "DEX" in str(type(parsed)) or hasattr(parsed, "dex_header"):
-                return "DEX"
-        return "RAW"
-    except Exception:
-        return "RAW"
+    p = Path(path)
+    if not p.exists():
+        return "UNKNOWN"
+    data = p.read_bytes()[:512]
+    suffix = p.suffix.lower()
+    if data.startswith(b"\x00asm"):
+        return "WASM"
+    if data.startswith(b"MZ") and (b"CLR" in data or b"BSJB" in data):
+        return "DOTNET"
+    if data.startswith(b"\x7fELF"):
+        return "ELF"
+    if data.startswith(b"MZ"):
+        return "PE"
+    if data[:4] in (
+        b"\xfe\xed\xfa\xce",
+        b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf",
+        b"\xcf\xfa\xed\xfe",
+    ):
+        return "MachO"
+    if data.startswith(b"dex\n"):
+        return "DEX"
+    return "RAW"
 
 
-def map_arch_to_capstone(arch: str) -> tuple[Any, Any]:
+def map_arch_to_capstone(arch: str) -> tuple[int, int]:
     """Map architecture string to Capstone constants.
 
-    Raises:
-        ValueError: For unsupported architectures.
+    Now includes wasm (CS_ARCH_WASM) and dotnet (falls back to x86_64 for
+    mixed-mode or native parts; pure CIL is not directly supported by Capstone).
     """
-    arch = arch.lower().strip()
-    if arch in ("auto", "unknown"):
-        arch = "x86"
-    arch_map: dict[str, tuple[Any, Any]] = {
-        "x86": (CS_ARCH_X86, CS_MODE_32),
-        "x86_64": (CS_ARCH_X86, CS_MODE_64),
-        "arm": (CS_ARCH_ARM, CS_MODE_ARM),
-        "arm64": (CS_ARCH_ARM64, CS_MODE_64),
-        "mips": (CS_ARCH_MIPS, CS_MODE_MIPS32),
-        "riscv": (CS_ARCH_RISCV, CS_MODE_RISCV32),
-        "wasm": (CS_ARCH_WASM, 0),
-    }
-    if arch not in arch_map:
-        raise ValueError(f"Unsupported architecture: {arch}")
-    return arch_map[arch]
+    arch = (arch or "auto").lower()
+    if arch in ("x86", "i386", "x86_64", "amd64", "auto", "dotnet", "cil", ".net"):
+        return CS_ARCH_X86, CS_MODE_64 if arch in ("x86_64", "amd64", "auto", "dotnet", "cil", ".net") else CS_MODE_32
+    if arch in ("arm", "armv7"):
+        return CS_ARCH_ARM, CS_MODE_ARM
+    if arch in ("aarch64", "arm64"):
+        return CS_ARCH_ARM64, 0
+    if arch in ("mips", "mips32"):
+        return CS_ARCH_MIPS, CS_MODE_MIPS32
+    if arch in ("riscv", "riscv32"):
+        return CS_ARCH_RISCV, CS_MODE_RISCV32
+    if arch in ("wasm", "webassembly"):
+        return CS_ARCH_WASM, 0
+    return CS_ARCH_X86, CS_MODE_64
+
+
+def calculate_entropy(data: bytes) -> float:
+    """Calculate Shannon entropy of byte string."""
+    if not data:
+        return 0.0
+    entropy = 0.0
+    for x in range(256):
+        p_x = data.count(bytes([x])) / len(data)
+        if p_x > 0.0:
+            entropy -= p_x * math.log2(p_x)
+    return entropy

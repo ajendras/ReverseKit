@@ -1,10 +1,10 @@
 """Core module providing the Binary abstraction using LIEF.
 
 This is the foundation of RevKit. Handles loading of multiple binary formats
-(ELF, PE, Mach-O, DEX, RAW), metadata extraction, string scanning, entropy calculation
+(ELF, PE, Mach-O, DEX, WASM, DOTNET, RAW), metadata extraction, string scanning, entropy calculation
 and memory access for disassembly.
 
-Dedicated native parsers (MachOParser, DEXParser) provide format-specific
+Dedicated native parsers (MachOParser, DEXParser, WasmParser, DotNetParser) provide format-specific
 handling while reusing LIEF where possible. RAW format is used for flat
 binaries, shellcode and files that LIEF cannot parse (e.g. empty files).
 """
@@ -67,10 +67,62 @@ class DEXParser:
         return [m.name for cls in self.classes for m in getattr(cls, "methods", []) if hasattr(m, "name")]
 
 
+class WasmParser:
+    """Native parser for WebAssembly (WASM) modules.
+
+    Uses LIEF WASM support for sections, exports (functions) and metadata.
+    """
+
+    def __init__(self, lief_binary: Any) -> None:
+        self.binary = lief_binary
+        self.functions: list[Any] = list(getattr(lief_binary, "exported_functions", []))
+
+    def entry_point(self) -> int:
+        """WASM modules have no traditional entrypoint; return 0 or first export."""
+        for f in self.functions:
+            if getattr(f, "name", "") in ("_start", "main", "start"):
+                return 0
+        return 0
+
+    def sections(self) -> list[Any]:
+        return list(getattr(self.binary, "sections", []))
+
+    def symbols(self) -> list[Any]:
+        return self.functions
+
+
+class DotNetParser:
+    """Parser for .NET managed assemblies (PE with .NET metadata).
+
+    Leverages LIEF .NET metadata for methods, entrypoint token and classes.
+    """
+
+    def __init__(self, lief_binary: Any) -> None:
+        self.binary = lief_binary
+        self._dotnet = getattr(lief_binary, "dotnet", None)
+        self.methods: list[Any] = list(getattr(self._dotnet, "methods", [])) if self._dotnet else []
+
+    def entry_point(self) -> int:
+        """Return entry point from .NET metadata or fall back to PE entrypoint."""
+        if self._dotnet and hasattr(self._dotnet, "entrypoint_token") and self._dotnet.entrypoint_token:
+            return int(getattr(self.binary, "entrypoint", 0))
+        return int(getattr(self.binary, "entrypoint", 0))
+
+    def sections(self) -> list[Any]:
+        return list(getattr(self.binary, "sections", []))
+
+    def symbols(self) -> list[Any]:
+        return self.methods
+
+    def methods(self) -> list[str]:
+        """Return list of .NET method names."""
+        return [getattr(m, "name", "unknown") for m in self.methods if hasattr(m, "name")]
+
+
 class Binary:
     """Universal binary loader with format-specific parsers and analysis helpers.
 
-    Supports ELF, PE, Mach-O, DEX, and RAW (flat/shellcode) binaries via LIEF
+    Supports ELF, PE, Mach-O, DEX, WASM, DOTNET, and RAW (flat/shellcode) binaries via LIEF
     with native fallback parsers. Provides lazy access to disassembly, strings,
     symbols, CFG, tracing and FLIRT matching.
     """
@@ -106,14 +158,24 @@ class Binary:
 
     def _detect_format(self) -> str:
         """Return normalized format string."""
+        data = self.path.read_bytes()[:512]
         suffix = self.path.suffix.lower()
-        if suffix in (".elf", ".so", ""):
+        if data.startswith(b"\x00asm"):
+            return "WASM"
+        if data.startswith(b"MZ") and (b"CLR" in data or b"BSJB" in data):
+            return "DOTNET"
+        if suffix in (".elf", ".so", "") and data.startswith(b"\x7fELF"):
             return "ELF"
-        if suffix in (".exe", ".dll", ".pe"):
+        if suffix in (".exe", ".dll", ".pe") and data.startswith(b"MZ"):
             return "PE"
-        if suffix in (".mach-o", ".dylib", "") and b"\xcf\xfa\xed\xfe" in self.path.read_bytes()[:16]:
+        if suffix in (".mach-o", ".dylib", "") and (
+            b"\xcf\xfa\xed\xfe" in data[:16]
+            or b"\xce\xfa\xed\xfe" in data[:16]
+            or b"\xfe\xed\xfa\xce" in data[:16]
+            or b"\xfe\xed\xfa\xcf" in data[:16]
+        ):
             return "MachO"
-        if suffix == ".dex" or b"dex\n" in self.path.read_bytes()[:8]:
+        if suffix == ".dex" or b"dex\n" in data:
             return "DEX"
         return "RAW"
 
@@ -131,19 +193,39 @@ class Binary:
             if self._binary is None:
                 raise ValueError("LIEF could not parse binary")
 
-            if self.format == "MachO":
+            if self.format == "WASM":
+                self._parser = WasmParser(self._binary)
+                self.base_address = 0x0
+                self._entry_point = self._parser.entry_point()
+                self._architecture = "wasm"
+                self._sections = self._parser.sections()
+            elif self.format == "DOTNET":
+                self._parser = DotNetParser(self._binary)
+                self.base_address = int(getattr(self._binary, "imagebase", 0x400000))
+                self._entry_point = self._parser.entry_point()
+                self._architecture = "x86_64"
+                self._sections = self._parser.sections()
+            elif self.format == "MachO":
                 self._parser = MachOParser(self._binary)
                 self.base_address = int(getattr(self._binary, "imagebase", 0x100000000))
                 self._entry_point = self._parser.entry_point()
+                self._architecture = "x86_64"
+                self._sections = self._parser.sections()
             elif self.format == "DEX":
                 self._parser = DEXParser(self._binary)
+                self.base_address = 0x0
                 self._entry_point = 0x0
+                self._architecture = "dalvik"
+                self._sections = []
             else:
                 self.base_address = int(getattr(self._binary, "imagebase", 0x400000))
                 self._entry_point = int(getattr(self._binary, "entrypoint", 0))
-
-            self._architecture = self._binary.header.architecture.name if hasattr(self._binary.header, "architecture") else None
-            self._sections = list(self._binary.sections) if hasattr(self._binary, "sections") else []
+                self._architecture = (
+                    self._binary.header.architecture.name
+                    if hasattr(self._binary.header, "architecture")
+                    else None
+                )
+                self._sections = list(self._binary.sections) if hasattr(self._binary, "sections") else []
 
         except Exception as exc:  # fallback to RAW for malformed/flat files
             self.format = "RAW"
@@ -167,10 +249,14 @@ class Binary:
     def symbols(self) -> list[Any]:
         """Return exported/imported symbols."""
         if not self._symbols:
-            if hasattr(self._binary, "symbols"):
+            if self._parser and hasattr(self._parser, "symbols"):
+                self._symbols = self._parser.symbols()
+            elif hasattr(self._binary, "symbols"):
                 self._symbols = list(self._binary.symbols)
             elif hasattr(self._binary, "exported_functions"):
                 self._symbols = list(self._binary.exported_functions)
+            elif self.format == "DOTNET" and self._parser and hasattr(self._parser, "methods"):
+                self._symbols = self._parser.methods()
         return self._symbols
 
     def strings(self) -> list[str]:
@@ -210,7 +296,11 @@ class Binary:
         try:
             if length is None:
                 length = 0
-            return bytes(self._binary.get_content_from_virtual_address(start or self.base_address, length or len(self.path.read_bytes())))
+            return bytes(
+                self._binary.get_content_from_virtual_address(
+                    start or self.base_address, length or len(self.path.read_bytes())
+                )
+            )
         except Exception:
             # fallback to full file
             return self.path.read_bytes()
@@ -218,6 +308,7 @@ class Binary:
     def enable_r2(self) -> None:
         """Enable Radare2 bridge for advanced analysis."""
         from .r2bridge import R2Bridge
+
         self.r2bridge = R2Bridge(self)
 
     def match_flirt(self, download: bool = True) -> dict[int, str]:
@@ -230,6 +321,7 @@ class Binary:
             Dict of VA to matched library function name (guaranteed to be str).
         """
         from .scanner import FlirtMatcher
+
         matcher = FlirtMatcher(self)
         matches = matcher.match(download=download)
         # Normalize names to str for JSON compatibility in reports/tests.

@@ -40,162 +40,64 @@ class Function:
         self.address = address
         self.instructions = instructions
         self.comment: str = ""
-        self.var_names: dict[int, str] = {}  # offset -> name
+        self.variables: dict[str, str] = {}
 
     def to_asm(self) -> str:
-        """Return a pretty-printed assembly listing with address, bytes, mnemonic.
-
-        Respects any AI-added comments or variable renames (future).
-        """
-        lines = [f"{self.name}:  # @ {hex(self.address)}"]
-        if self.comment:
-            lines.append(f"    ; {self.comment}")
-
+        """Return formatted assembly listing."""
+        lines = [f"{self.name}() {{"]  # type: list[str]
         for insn in self.instructions:
-            addr = insn.address
-            byte_str = " ".join(f"{b:02x}" for b in insn.bytes).ljust(20)
-            asm_line = f"  {addr:0>8x}:  {byte_str}{insn.mnemonic} {insn.op_str}"
-
-            # Could insert variable names here if implemented
-            lines.append(asm_line)
-
+            addr = f"{insn.address:08x}"
+            bytes_str = " ".join(f"{b:02x}" for b in insn.bytes)
+            lines.append(f"  {addr}: {bytes_str:<20} {insn.mnemonic} {insn.op_str}")
+        lines.append("}")
+        if self.comment:
+            lines.insert(0, f"; {self.comment}")
         return "\n".join(lines)
 
-    def __str__(self) -> str:
-        return self.to_asm()
+
+def get_function(binary: Binary, name_or_addr: str | int, length: int = 256) -> Function:
+    """Get Function object by symbol name or address."""
+    addr = 0
+    name = "unknown"
+    if isinstance(name_or_addr, str):
+        name = name_or_addr
+        for sym in binary.symbols():
+            if getattr(sym, "name", "") == name_or_addr or getattr(sym, "name", "") == f"_{name_or_addr}":
+                addr = int(getattr(sym, "value", 0)) or int(getattr(sym, "address", 0))
+                break
+        if addr == 0:
+            addr = binary.entry_point()
+    else:
+        addr = name_or_addr
+        name = f"func_{addr:x}"
+    return _disassemble_range_to_function(binary, addr, length, name)
+
+
+def _disassemble_range_to_function(
+    binary: Binary, start: int, length: int, name: str
+) -> Function:
+    """Disassemble bytes into Function (internal helper)."""
+    code = binary.read_bytes(start, length)
+    arch, mode = map_arch_to_capstone(binary.architecture or "auto")
+    md = Cs(arch, mode)
+    md.detail = True
+    instructions = list(md.disasm(code, start))
+    return Function(name, start, instructions)
 
 
 def disassemble_range(
-    binary: Binary,
-    start: int,
-    length: int = 64,
-    arch: str = "auto",
+    binary: Binary, start: int, length: int = 64, arch: str = "auto"
 ) -> str:
-    """Disassemble a memory range into a human-readable assembly string.
-
-    Args:
-        binary: RevKit Binary instance.
-        start: Virtual address to start disassembling from.
-        length: Maximum number of bytes to decode.
-        arch: Architecture (auto uses binary.architecture).
-
-    Returns:
-        Formatted disassembly text.
-
-    Raises:
-        ValueError: Unsupported architecture.
-        RuntimeError: Failed to read memory at address.
-    """
-    if arch == "auto" or arch == "unknown":
-        arch = binary.architecture or "x86"
-
-    try:
-        cs_arch, cs_mode = map_arch_to_capstone(arch)
-    except ValueError as exc:
-        raise ValueError(f"Unsupported architecture '{arch}' is not supported by Capstone") from exc
-
-    md = Cs(cs_arch, cs_mode)
-    md.detail = True
-    md.skipdata = True
-
-    try:
-        code = binary.read_bytes(start, length)
-    except Exception as exc:
-        raise RuntimeError(f"Cannot read {length} bytes at {hex(start)}") from exc
-
-    if not code:
-        return f"; No data at virtual address {hex(start)}"
-
-    disassembly: list[str] = []
-    for insn in md.disasm(code, start):
-        bytes_hex = " ".join(f"{b:02x}" for b in insn.bytes)
-        disassembly.append(
-            f"{insn.address:08x}  {bytes_hex:<24} {insn.mnemonic:8} {insn.op_str}"
-        )
-
-    return "\n".join(disassembly)
-
-
-def get_function(
-    binary: Binary, name_or_addr: str | int, length: int = 192
-) -> Function:
-    """Return a Function object for the given symbol name or virtual address.
-
-    Uses symbol table lookup when a name is provided. Falls back to entry point
-    for common names like 'main'. Disassembles a fixed window of bytes.
-
-    Args:
-        binary: The loaded binary.
-        name_or_addr: Function name or start address.
-        length: How many bytes to disassemble for the function body.
-
-    Returns:
-        Function wrapper with .to_asm() capability.
-    """
-    if isinstance(name_or_addr, int):
-        addr = name_or_addr
-        name = f"sub_{addr:x}"
-    else:
-        name = str(name_or_addr)
-        addr = _resolve_symbol(binary, name)
-        if addr is None:
-            if name.lower() in ("main", "start", "_start"):
-                addr = binary.entry_point()
-            else:
-                # Fallback: use entry point
-                addr = binary.entry_point()
-                name = "entry"
-
-    instructions = _disassemble_to_instructions(binary, addr, length, arch="auto")
-
-    return Function(name, addr, instructions)
-
-
-def _resolve_symbol(binary: Binary, name: str) -> int | None:
-    """Helper to find virtual address of a symbol by name."""
-    for sym in binary.symbols():
-        if hasattr(sym, "name") and getattr(sym, "name", None) == name:
-            # LIEF symbols usually have .value for address
-            if hasattr(sym, "value") and sym.value != 0:
-                return sym.value
-            if hasattr(sym, "address"):
-                return sym.address
-    return None
-
-
-def _disassemble_to_instructions(
-    binary: Binary, start: int, length: int = 192, arch: str = "auto"
-) -> list[CsInsn]:
-    """Internal helper returning raw Capstone instruction objects."""
-    if arch == "auto" or arch == "unknown":
-        arch = binary.architecture or "x86"
-
-    cs_arch, cs_mode = map_arch_to_capstone(arch)
-
-    md = Cs(cs_arch, cs_mode)
-    md.detail = True
-    md.skipdata = True
-
+    """Disassemble a raw byte range."""
     code = binary.read_bytes(start, length)
-    return list(md.disasm(code, start))
-
-
-if __name__ == "__main__":
-    # Demo / test with a tiny x86 binary
-    import tempfile
-    from pathlib import Path
-
-    shellcode = b"\x55\x48\x89\xe5\x48\x83\xec\x10\xb8\x01\x00\x00\x00\xc3"
-    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
-        f.write(shellcode)
-        tmp = f.name
-
-    try:
-        bin_obj = Binary(tmp)
-        print("Disassembly:")
-        print(disassemble_range(bin_obj, 0, 20))
-        func = get_function(bin_obj, 0)
-        print("\nFunction:")
-        print(func.to_asm())
-    finally:
-        Path(tmp).unlink()
+    if not code:
+        return ""
+    use_arch = arch if arch != "auto" else (binary.architecture or "auto")
+    arch_const, mode = map_arch_to_capstone(use_arch)
+    md = Cs(arch_const, mode)
+    md.detail = False
+    lines = []
+    for insn in md.disasm(code, start):
+        bytes_str = " ".join(f"{b:02x}" for b in insn.bytes[:6])
+        lines.append(f"{insn.address:08x}: {bytes_str:<20} {insn.mnemonic} {insn.op_str}")
+    return "\n".join(lines)

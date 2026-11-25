@@ -41,12 +41,12 @@ Reverse engineering workflows are fragmented across Ghidra, radare2, custom scri
 <td align="center" valign="top" width="33%">
 🔄<br>
 <b>Universal Loader</b><br>
-Auto-detects and parses ELF, PE, Mach-O, DEX, and raw/flat binaries (including shellcode) using LIEF with dedicated native parsers for Mach-O (segments/load commands) and DEX (classes/methods)
+Auto-detects and parses ELF, PE, Mach-O, DEX, WASM, .NET, and raw/flat binaries (including shellcode) using LIEF with dedicated native parsers for Mach-O (segments/load commands), DEX (classes/methods), WASM (exports/sections) and .NET (metadata/methods)
 </td>
 <td align="center" valign="top" width="33%">
 ⚡<br>
 <b>Capstone Disasm</b><br>
-Lightning-fast disassembly for x86, ARM, MIPS, RISC-V and WebAssembly
+Lightning-fast disassembly for x86, ARM, MIPS, RISC-V, WebAssembly and .NET (via x86 fallback for mixed-mode)
 </td>
 <td align="center" valign="top" width="33%">
 📈<br>
@@ -177,7 +177,7 @@ revkit info sample.elf --arch x86_64
 Disassemble a function:
 
 ```bash
-revkit disassemble sample.elf --function main --length 128
+revkit disassemble sample.wasm --function main --length 128
 ```
 
 Generate a control-flow graph:
@@ -337,7 +337,7 @@ print(match_flirt("binary"))
 
 | Option       | Default   | Description                                      |
 |--------------|-----------|--------------------------------------------------|
-| `arch`       | `auto`    | Architecture hint passed to Capstone (x86, arm, riscv, auto) |
+| `arch`       | `auto`    | Architecture hint passed to Capstone (x86, arm, riscv, wasm, dotnet, auto) |
 | `ai`         | `False`   | Enable local Ollama annotation via AIAnnotator |
 | `r2`         | `False`   | Enable Radare2 bridge (requires r2pipe and radare2) for advanced features |
 | `flirt`      | `False`   | Enable FLIRT signature database matching for library function identification |
@@ -354,7 +354,7 @@ print(match_flirt("binary"))
 ```mermaid
 flowchart TD
     CLI[cli.py — Typer commands] --> API[__init__.py — analyze / disassemble / annotate]
-    API --> Binary[core.Binary — LIEF loader + native Mach-O/DEX parsers]
+    API --> Binary[core.Binary — LIEF loader + native Mach-O/DEX/WASM/.NET parsers]
     Binary --> Disasm[disasm.py — Capstone + Function]
     Binary --> R2[R2Bridge — advanced graph + ESIL emulation]
     Binary --> Ghidra[GhidraDecompiler — headless decompilation to C]
@@ -374,7 +374,7 @@ flowchart TD
     Report --> Outputs[HTML / Markdown / JSON + embedded SVGs]
 ```
 
-The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser` and `DEXParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX). Raw/flat binaries (including empty files and shellcode) are supported as format="RAW". Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts. When `r2=True` (or `binary.enable_r2()`), `R2Bridge` augments `CFGBuilder` with radare2's `aaa` + `afbJ` for accurate basic-block CFGs and ESIL emulation. The new `UnicornTracer` (or `binary.trace()`) provides instruction-level dynamic execution tracing with optional register dumps. The new plugin system lets third-party packages register `Analyzer` subclasses via the `revkit.analyzers` entry point; `analyze(..., plugins=[...])` runs them and merges results into the returned dictionary and reports. `FlirtMatcher` (integrated in `VulnScanner` and `Binary.match_flirt()`) downloads a signature database to `~/.cache/revkit/flirt` and performs masked byte-pattern matching on function prologues for common library identification (x86_64/ARM). The new `GhidraDecompiler` (activated via `binary.enable_ghidra()` or `analyze(ghidra=True)`) runs Ghidra's `analyzeHeadless` with an embedded Python post-analysis script to produce accurate C decompilation; results are attached to `Binary` and included in reports.
+The central `Binary` class (powered by LIEF) is passed between modules. Dedicated `MachOParser`, `DEXParser`, `WasmParser` and `DotNetParser` classes provide format-specific handling (segments/load commands for Mach-O, classes/methods for DEX, exports/sections for WASM, metadata/methods for .NET). Raw/flat binaries (including empty files and shellcode) are supported as format="RAW". Disassembly, AI annotation and CFG generation are lazily executed only when needed. The public API and CLI both call the same underlying functions, guaranteeing identical results whether used interactively or in scripts. When `r2=True` (or `binary.enable_r2()`), `R2Bridge` augments `CFGBuilder` with radare2's `aaa` + `afbJ` for accurate basic-block CFGs and ESIL emulation. The new `UnicornTracer` (or `binary.trace()`) provides instruction-level dynamic execution tracing with optional register dumps. The new plugin system lets third-party packages register `Analyzer` subclasses via the `revkit.analyzers` entry point; `analyze(..., plugins=[...])` runs them and merges results into the returned dictionary and reports. `FlirtMatcher` (integrated in `VulnScanner` and `Binary.match_flirt()`) downloads a signature database to `~/.cache/revkit/flirt` and performs masked byte-pattern matching on function prologues for common library identification (x86_64/ARM). The new `GhidraDecompiler` (activated via `binary.enable_ghidra()` or `analyze(ghidra=True)`) runs Ghidra's `analyzeHeadless` with an embedded Python post-analysis script to produce accurate C decompilation; results are attached to `Binary` and included in reports.
 
 ## 📁 Project structure
 
@@ -382,7 +382,7 @@ The central `Binary` class (powered by LIEF) is passed between modules. Dedicate
 src/revkit/
 ├── __init__.py          # Public API: Binary, analyze(), disassemble(), annotate(), generate_report(), match_flirt(), decompile()
 ├── cli.py               # Typer CLI: info, analyze, disassemble, annotate, visualize, report
-├── core.py              # Binary class + MachOParser/DEXParser — LIEF parsing, strings(), symbols(), entropy(), read_bytes(), enable_r2(), enable_ghidra(), decompile(), match_flirt()
+├── core.py              # Binary class + MachOParser/DEXParser/WasmParser/DotNetParser — LIEF parsing, strings(), symbols(), entropy(), read_bytes(), enable_r2(), enable_ghidra(), decompile(), match_flirt()
 ├── disasm.py            # Capstone wrapper, disassemble_range(), get_function(), Function.to_asm()
 ├── graph.py             # CFGBuilder — build_cfg(), export_png(), export_svg(), export_dot()
 ├── r2bridge.py          # R2Bridge for advanced graph (afbJ) and emulation (ESIL)
@@ -410,7 +410,7 @@ examples/
 pytest
 ```
 
-The test suite covers Binary loading (including RAW binaries), string extraction, symbol table parsing, entropy calculation, Capstone disassembly accuracy on known x86/ARM snippets, mocked Ollama responses for annotation tests, R2Bridge integration (with graceful fallback when r2pipe/radare2 is unavailable), Unicorn tracing (skipped when unicorn is not installed), and the new FlirtMatcher (builtin signatures, download, matching). New tests cover `match_flirt()`, `VulnScanner.match_flirt(download=False)` and integration in `analyze(flirt=True)`. The plugin system (mocked entry points and custom Analyzer subclasses) is also tested. GhidraDecompiler tests cover availability detection, graceful fallback when not installed, and integration with `Binary.decompile()` / `analyze(ghidra=True)` (using mocks).
+The test suite covers Binary loading (including RAW binaries), string extraction, symbol table parsing, entropy calculation, Capstone disassembly accuracy on known x86/ARM snippets, mocked Ollama responses for annotation tests, R2Bridge integration (with graceful fallback when r2pipe/radare2 is unavailable), Unicorn tracing (skipped when unicorn is not installed), and the new FlirtMatcher (builtin signatures, download, matching). New tests cover `match_flirt()`, `VulnScanner.match_flirt(download=False)` and integration in `analyze(flirt=True)`. The plugin system (mocked entry points and custom Analyzer subclasses) is also tested. GhidraDecompiler tests cover availability detection, graceful fallback when not installed, and integration with `Binary.decompile()` / `analyze(ghidra=True)` (using mocks). Additional tests were added for WASM and .NET format detection, parser classes and loading.
 
 ## 📍 Roadmap
 
@@ -422,7 +422,7 @@ The test suite covers Binary loading (including RAW binaries), string extraction
 - [x] Plugin system for third-party analyzers
 - [x] FLIRT signature database downloader and matcher
 - [x] Headless Ghidra integration for decompilation
-- [ ] WebAssembly and .NET binary support
+- [x] WebAssembly and .NET binary support
 - [ ] Parallel processing for large firmware images
 - [ ] Interactive terminal explorer (REPL mode)
 - [ ] Export to IDA .idb and Binary Ninja .bndb
